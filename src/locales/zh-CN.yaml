@@ -142,7 +142,6 @@ post:
   replyTo: 回复：{nickname}
   quote: '{nickname}：{content}'
   quoteNameOnly: '{nickname}'
-  replyInlineVerb: 回复
   compose:
     placeholder: 在此题壁…
     submit: 题壁

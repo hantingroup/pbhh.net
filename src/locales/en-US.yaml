@@ -147,7 +147,6 @@ post:
   replyTo: 'Reply to: {nickname}'
   quote: '{nickname}: {content}'
   quoteNameOnly: '{nickname}'
-  replyInlineVerb: replied to
   compose:
     placeholder: Write here...
     submit: Post

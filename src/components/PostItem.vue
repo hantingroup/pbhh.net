@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { Heart, MessageSquare } from 'lucide-vue-next'
 import { computed, onMounted, ref, watch } from 'vue'
-import { useI18n } from 'vue-i18n'
+import { Translation, useI18n } from 'vue-i18n'
 import { RouterLink, useRouter } from 'vue-router'
 import DeleteConfirmDialog from '@/components/DeleteConfirmDialog.vue'
 import { Button } from '@/components/ui/button'
@@ -96,6 +96,20 @@ function handleReplyClick() {
 
 <template>
   <div>
+    <div
+      v-if="parentId && parentNickname"
+      class="px-3 py-2 border rounded-lg text-sm text-muted-foreground cursor-pointer bg-muted/30 hover:bg-muted/50 transition-colors truncate"
+      @click.stop="emit('quoteClick', parentId!)"
+    >
+      <Translation v-if="parentContent" keypath="post.quote" tag="span">
+        <template #nickname>
+          <span class="font-medium text-foreground">{{ parentNickname }}</span>
+        </template>
+        <template #content>{{ parentContent }}</template>
+      </Translation>
+      <span v-else class="font-medium text-foreground">{{ parentNickname }}</span>
+    </div>
+    <div v-if="parentId && parentNickname" class="ml-5 w-0.5 h-3 bg-border" />
     <article
       :id="`post-${id}`"
       class="px-4 py-3 border rounded-xl bg-card transition-[colors,box-shadow]"
@@ -121,16 +135,6 @@ function handleReplyClick() {
 
       <div class="mt-2">
         <p v-if="title" class="font-bold text-sm mb-1">{{ title }}</p>
-        <div
-          v-if="parentId && parentNickname"
-          class="mb-1 text-sm text-muted-foreground cursor-pointer truncate"
-          @click.stop="emit('quoteClick', parentId)"
-        >
-          <span class="font-medium text-foreground">{{ nickname }}</span>
-          {{ ` ${t('post.replyInlineVerb')} ` }}
-          <span class="font-medium text-foreground">{{ parentNickname }}</span>
-          <span v-if="parentContent">{{ `：${parentContent}` }}</span>
-        </div>
         <div
           ref="contentRef"
           class="prose prose-sm max-w-none wrap-break-word"

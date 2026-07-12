@@ -6,6 +6,7 @@ import { useI18n } from 'vue-i18n'
 import { useRoute, useRouter } from 'vue-router'
 import PostCompose from '@/components/PostCompose.vue'
 import PostItem from '@/components/PostItem.vue'
+import PostThreadNode from '@/components/PostThreadNode.vue'
 import { Button } from '@/components/ui/button'
 import { Separator } from '@/components/ui/separator'
 import { Spinner } from '@/components/ui/spinner'
@@ -14,8 +15,13 @@ import { api, user } from '@/lib/api'
 type PostData = NonNullable<ReturnType<typeof PostService.get>>
 type ThreadItem = ReturnType<typeof PostService.listThread>[number]
 type AncestorItem = ReturnType<typeof PostService.listAncestors>[number]
+type ThreadNode = ThreadItem & { children: ThreadNode[] }
 
 const props = defineProps<{ id: number }>()
+
+const ROOT_THREAD_VISIBLE_DEPTH_LIMIT = 3
+const ROOT_THREAD_MAX_VISIBLE_DEPTH = 9
+const SUBTHREAD_VISIBLE_DEPTH_LIMIT = 15
 
 const { t } = useI18n()
 const router = useRouter()
@@ -32,6 +38,28 @@ const expandedAncestorChain = ref(false)
 const replyingToId = ref<number | null>(null)
 const composeRef = ref<InstanceType<typeof PostCompose> | null>(null)
 
+const threadTree = computed<ThreadNode[]>(() => {
+  const rootId = post.value?.id
+  if (!rootId)
+    return []
+
+  const nodeMap = new Map<number, ThreadNode>()
+  for (const item of thread.value)
+    nodeMap.set(item.id, { ...item, children: [] })
+
+  const roots: ThreadNode[] = []
+  for (const item of thread.value) {
+    const node = nodeMap.get(item.id)!
+    if (item.parentId === rootId) {
+      roots.push(node)
+      continue
+    }
+    nodeMap.get(item.parentId)?.children.push(node)
+  }
+
+  return roots
+})
+
 const ancestorPreviewCount = computed(() => {
   if (viewportWidth.value < 480)
     return 2
@@ -47,9 +75,29 @@ const visibleAncestors = computed(() => {
     return ancestors.value
   return ancestors.value.slice(-ancestorPreviewCount.value)
 })
-const sortedThread = computed(() =>
-  [...thread.value].sort((a, b) => a.createdAt - b.createdAt || a.id - b.id),
+const subthreadVisibleDepthLimit = computed(() => {
+  if (viewportWidth.value < 480)
+    return 4
+  if (viewportWidth.value < 768)
+    return 6
+  const availableWidth = Math.min(Math.max(viewportWidth.value - 48, 360), 672)
+  const minCardWidth = 280
+  const indentWidth = 42
+  return Math.max(5, Math.min(SUBTHREAD_VISIBLE_DEPTH_LIMIT, Math.floor((availableWidth - minCardWidth) / indentWidth) + 3))
+})
+const threadVisibleDepthLimit = computed(() =>
+  post.value?.parentId ? subthreadVisibleDepthLimit.value : ROOT_THREAD_VISIBLE_DEPTH_LIMIT,
 )
+const threadMaxVisibleDepth = computed<number | null>(() =>
+  post.value?.parentId ? subthreadVisibleDepthLimit.value : ROOT_THREAD_MAX_VISIBLE_DEPTH,
+)
+const threadVisualDepthLimit = computed(() => {
+  if (viewportWidth.value < 480)
+    return 2
+  if (viewportWidth.value < 768)
+    return 3
+  return 4
+})
 
 function updateViewportWidth() {
   viewportWidth.value = window.innerWidth
@@ -235,29 +283,31 @@ watch(() => props.id, load)
           <span class="text-sm font-semibold">{{ t('post.comments') }}</span>
           <Separator class="flex-1" />
         </div>
-        <div>
-          <template v-for="(item, index) in sortedThread" :key="item.id">
-            <div v-if="index > 0" class="h-3" />
-            <PostItem
-              v-bind="item"
-              replyable
-              :parent-nickname="item.parentNickname"
-              :parent-content="item.parentContent"
-              @reply="startReply(item.id)"
-              @deleted="onReplyDeleted"
-              @quote-click="onQuoteClick"
-            />
-            <template v-if="replyingToId === item.id">
-              <div class="h-4" />
+        <div class="space-y-3">
+          <PostThreadNode
+            v-for="item in threadTree"
+            :key="item.id"
+            :node="item"
+            :depth="1"
+            :replying-to-id="replyingToId"
+            :visible-depth-limit="threadVisibleDepthLimit"
+            :max-visible-depth="threadMaxVisibleDepth"
+            :visual-depth-limit="threadVisualDepthLimit"
+            :expand-step="3"
+            @reply="startReply"
+            @deleted="onReplyDeleted"
+            @quote-click="onQuoteClick"
+          >
+            <template #composer="{ node }">
               <PostCompose
                 :ref="setComposeRef"
-                :parent-id="item.id"
-                :reply-to="item.nickname"
+                :parent-id="node.id"
+                :reply-to="node.nickname"
                 @posted="onReplyPosted"
                 @cancel="replyingToId = null"
               />
             </template>
-          </template>
+          </PostThreadNode>
         </div>
       </template>
     </template>
