@@ -11,9 +11,9 @@ import { api, fetchUser, TOKEN } from '@/lib/api'
 
 const router = useRouter()
 const { t, te } = useI18n()
-const { username, password } = useValidators()
+const { loginUsername, password } = useValidators()
 const { fields, filled, hasErrors } = useFields({
-  username: { type: 'text', autocomplete: 'username', validate: username },
+  username: { type: 'text', autocomplete: 'username', validate: loginUsername },
   password: { type: 'password', autocomplete: 'current-password', validate: password },
 })
 

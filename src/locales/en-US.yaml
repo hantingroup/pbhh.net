@@ -27,8 +27,8 @@ signup:
   submit: Sign Up
   submitting: Signing up...
   usernameHint: >-
-    Your username identifies the account and cannot be changed after
-    registration.
+    Your username is your personal address (e.g. alice.pbhh.net). It is
+    case-insensitive and cannot be changed after registration.
   nicknameHint: >-
     Your nickname is used for display and can be changed later in your profile
     or settings.
@@ -213,6 +213,7 @@ bind:
   currentQQ: 'Currently linked QQ:'
   unbind: Unlink
   unbindFailed: Failed to unlink. Please try again later.
+  invalidCode: The verification code is incorrect or has expired
   intro: >-
     Click the button below to get a verification code, then send it to the QQ
     bot to complete account linking.
@@ -330,6 +331,7 @@ error:
   invalidCredentials: Incorrect username or password
   badRequest: Invalid request
   usernameExists: Username already exists
+  usernameReserved: That username is reserved by the system, please pick another
   unauthorized: Unauthorized
   tokenExpired: Token is invalid or expired
   userNotFound: User not found

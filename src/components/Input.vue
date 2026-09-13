@@ -57,13 +57,22 @@ watch(() => modelValue.value, (newValue) => {
         :class="[
           error && 'border-destructive',
           slots.append && 'pr-11',
+          slots.suffix && 'rounded-r-none',
         ]"
         :disabled="disabled"
         :model-value="modelValue"
         @update:model-value="modelValue = $event as string"
       />
+      <!-- `append` 是浮在输入框内部的（如密码显隐按钮），`suffix` 是拼接在右侧的
+           固定附加段（如 `.pbhh.net`）。两者服务于不同字段，不会同时出现。 -->
       <div v-if="slots.append" class="absolute inset-y-0 right-3 flex items-center">
         <slot name="append" />
+      </div>
+      <div
+        v-if="slots.suffix"
+        class="-ml-2 flex select-none items-center rounded-r-md border border-l-0 border-input bg-muted px-3 text-sm text-muted-foreground"
+      >
+        <slot name="suffix" />
       </div>
     </div>
   </div>

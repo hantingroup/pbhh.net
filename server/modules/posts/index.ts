@@ -1,12 +1,20 @@
 import { Elysia, t } from 'elysia'
 import { optionalAuth, requireAuth } from '../auth/guard'
+import * as AuthService from '../auth/service'
 import { bus } from '../events/bus'
 import { createPostBody, replyBody } from './model'
 import * as PostService from './service'
 
 export default new Elysia()
   .use(optionalAuth)
-  .get('/posts', ({ query, username }) => PostService.list(username, query.username), {
+  .get('/posts', ({ query, username }) => {
+    // `?username=` 大小写自由；归一到存储形式。解析不出来就原样传下去 ——
+    // 等值比较自然匹配不到任何行，结果为空的语义保持不变。
+    const filter = query.username
+      ? (AuthService.resolveUsername(query.username) ?? query.username)
+      : undefined
+    return PostService.list(username, filter)
+  }, {
     query: t.Object({ username: t.Optional(t.String()) }),
   })
   .get('/posts/:id', ({ params, status, username }) => {

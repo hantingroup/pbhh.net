@@ -1,15 +1,25 @@
-import { index, integer, primaryKey, sqliteTable, text } from 'drizzle-orm/sqlite-core'
+import { sql } from 'drizzle-orm'
+import { index, integer, primaryKey, sqliteTable, text, uniqueIndex } from 'drizzle-orm/sqlite-core'
 
 export type NotificationType = 'like' | 'reply' | 'post' | 'mail'
 export const NOTIFICATION_TYPES: NotificationType[] = ['like', 'reply', 'post', 'mail']
 
 export const users = sqliteTable('users', {
+  /** 同时是 `*.pbhh.net` 的 DNS label，保留用户选择的显示大小写（`BeiDou`）。 */
   username: text('username').notNull().primaryKey(),
   nickname: text('nickname').notNull(),
   password: text('password').notNull(),
   avatar: text('avatar').notNull().default(''),
   createdAt: integer('created_at', { mode: 'timestamp' }).notNull().$defaultFn(() => new Date()),
-})
+}, () => [
+  /**
+   * 唯一性必须大小写不敏感（`Alice` 与 `alice` 是同一个人的两种写法），但主键是
+   * `TEXT PRIMARY KEY`，SQLite 默认 BINARY 排序，挡不住；drizzle 0.45.1 也没有列级
+   * `COLLATE NOCASE`。所以唯一性落在表达式索引上 —— drizzle-kit 支持，无需手改
+   * `drizzle/`。表达式里不能有 `,` 或 `;`（快照用 `join(",")` 切分）。
+   */
+  uniqueIndex('users_username_lower_idx').on(sql`lower(username)`),
+])
 
 export const userCapabilities = sqliteTable('user_capabilities', {
   username: text('username').notNull().references(() => users.username),
@@ -143,22 +153,16 @@ export const hitokoto = sqliteTable('hitokoto', {
 // 不自建 PDS：用户带自己的 repo 来，这里只存「哪个本地账号对应哪个 DID」。
 
 export const atprotoIdentities = sqliteTable('atproto_identities', {
+  /** 本地账号，同时就是 `*.pbhh.net` 的 label —— handle 为 `lower(username).pbhh.net`。 */
   username: text('username').notNull().primaryKey().references(() => users.username),
   did: text('did').notNull().unique(),
   /**
    * 最后一次观测到的 atproto handle（`alice.bsky.social`），仅作展示与重解析用。
    * 刻意**不加唯一约束**：handle 在 atproto 里是全球唯一的，但我们这份是副本，
    * 用户改 handle 后本行会过期，届时另一用户可能取走旧 handle —— 唯一约束会在
-   * 那次绑定时硬失败。查询一律走 `did` 或 `domainLabel`，唯一性买不到东西。
+   * 那次绑定时硬失败。查询一律走 `did` 或 `username`，唯一性买不到东西。
    */
   handle: text('handle').notNull(),
-  /**
-   * 用户认领的 `*.pbhh.net` 子域标签（`alice`），与上面的 atproto handle 分开存：
-   * 认领必须发生在用户去 Bluesky 改 handle **之前**（改的时候对方会来抓
-   * `/.well-known/atproto-did` 校验），所以认领后、改完前，两者并不相等。
-   * null = 未认领。
-   */
-  domainLabel: text('domain_label').unique(),
   pdsUrl: text('pds_url').notNull(),
   createdAt: integer('created_at', { mode: 'timestamp' }).notNull().$defaultFn(() => new Date()),
 })

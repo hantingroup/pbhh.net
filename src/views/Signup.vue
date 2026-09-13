@@ -73,6 +73,10 @@ async function handleSubmit(): Promise<string | void> {
       @focusin="activeHintField = String(key)"
       @focusout="activeHintField = activeHintField === String(key) ? null : activeHintField"
     >
+      <template v-if="key === 'username'" #suffix>
+        .pbhh.net
+      </template>
+
       <template v-if="key === 'password' || key === 'confirmPassword'" #append>
         <button
           type="button"

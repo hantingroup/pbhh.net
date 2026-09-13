@@ -15,11 +15,14 @@ export default new Elysia()
     return { token: await jwt.sign({ sub: user.username }) }
   }, { body: loginBody })
   .post('/signup', async ({ body, status, jwt }) => {
-    const user = await AuthService.create(body)
-    if (!user)
-      return status(409, { message: 'error.usernameExists' })
-    bus.publish('user.registered', { username: user.username })
-    return status(201, { token: await jwt.sign({ sub: user.username }) })
+    const result = await AuthService.create(body)
+    if (!result.ok) {
+      return result.reason === 'reserved'
+        ? status(409, { message: 'error.usernameReserved' })
+        : status(409, { message: 'error.usernameExists' })
+    }
+    bus.publish('user.registered', { username: result.username })
+    return status(201, { token: await jwt.sign({ sub: result.username }) })
   }, { body: signUpBody })
   .use(optionalAuth)
   .get('/users/:username', ({ params, status, username: viewer }) => {

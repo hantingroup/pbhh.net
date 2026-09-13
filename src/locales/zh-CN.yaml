@@ -25,7 +25,7 @@ signup:
   title: 注册
   submit: 注册
   submitting: 注册中…
-  usernameHint: 用户名用于标识账户，注册后不可变更。
+  usernameHint: 用户名就是你的个人地址（如 alice.pbhh.net），不区分大小写，注册后不可变更。
   nicknameHint: 昵称用于页面展示，注册后可在个人资料或设置中修改。
   hasAccount: 已有账户？
   loginLink: 立即登录
@@ -208,6 +208,7 @@ bind:
   currentQQ: 当前绑定 QQ：
   unbind: 解绑
   unbindFailed: 解绑失败，请稍后再试
+  invalidCode: 验证码不正确或已过期
   intro: 点击下方按钮获取绑定验证码，然后将验证码发送给 QQ 机器人即可完成绑定。
   getCode: 获取验证码
   requestFailed: 获取验证码失败，请稍后再试
@@ -347,6 +348,7 @@ error:
   invalidCredentials: 用户名或密码错误
   badRequest: 参数错误
   usernameExists: 用户名已存在
+  usernameReserved: 该用户名已被系统保留，请换一个
   unauthorized: 未授权
   tokenExpired: 令牌无效或已过期
   userNotFound: 用户不存在
