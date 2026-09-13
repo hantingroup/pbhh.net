@@ -4,14 +4,20 @@ import { useRouter } from 'vue-router'
 import NavBrand from '@/components/NavBrand.vue'
 import NavUser from '@/components/NavUser.vue'
 import { ScrollArea } from '@/components/ui/scroll-area'
-import { API_BASE, unreadCount, user } from '@/lib/api'
+import { API_BASE, TOKEN, unreadCount, user } from '@/lib/api'
 
 let sse: EventSource | null = null
 
 onMounted(() => {
-  if (!user.value)
+  if (!user.value || !TOKEN.value)
     return
-  sse = new EventSource(`${API_BASE}/events/sse`)
+  // EventSource 不能设请求头，token 只能走 query。这里只订阅通知话题，而服务端
+  // 的匿名白名单里**没有** `net.pbhh.notify.*`，所以 token 是必需的。
+  const query = new URLSearchParams({
+    token: TOKEN.value,
+    topics: 'net.pbhh.notify.*',
+  })
+  sse = new EventSource(`${API_BASE}/events/sse?${query}`)
   sse.onmessage = (e) => {
     const event = JSON.parse(e.data) as { topic: string, payload: { recipientUsername?: string } }
     if (event.topic.startsWith('net.pbhh.notify.') && event.payload.recipientUsername === user.value?.username)

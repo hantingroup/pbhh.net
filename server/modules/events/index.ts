@@ -92,8 +92,23 @@ const streamQuery = t.Object({
   topics: t.Optional(t.String()),
 })
 
-function parseTopics(param: string | undefined): string[] {
-  return param ? param.split(',').map(s => s.trim()).filter(Boolean) : ['*']
+/**
+ * 匿名 SSE 只放行这几个 topic。**必须逐条列出，不能写 `net.pbhh.post.*`** ——
+ * 前缀匹配会让将来新增的话题自动对匿名公开，白名单就失去了「加新东西时必须有人
+ * 主动决定」的意义。
+ *
+ * `app.bsky.*` 刻意不进：它内容本身是公开的，但一旦放进来，本站就成了「按 DID
+ * 抓取本站用户 Bluesky 帖」的稳定公开接口。题壁流的实时刷新不需要它 —— 镜像成功
+ * 后会补发本地 `net.pbhh.post.created`（见 jetstream.ts）。
+ */
+const PUBLIC_TOPICS = new Set([
+  'net.pbhh.post.created',
+  'net.pbhh.post.liked',
+  'net.pbhh.post.replied',
+])
+
+function parseTopics(param: string | undefined, fallback: string[] = ['*']): string[] {
+  return param ? param.split(',').map(s => s.trim()).filter(Boolean) : fallback
 }
 
 export default new Elysia({ prefix: '/events' })
@@ -134,13 +149,18 @@ export default new Elysia({ prefix: '/events' })
   })
   .get('/sse', async ({ query, jwt, status }) => {
     const { token, topics: topicsParam } = query
-    const topics = parseTopics(topicsParam)
 
-    if (token) {
-      const payload = await jwt.verify(token)
-      if (!payload || typeof payload.sub !== 'string')
-        return status(401, { message: 'error.unauthorized' })
-    }
+    // 非法 token 一律 401，**绝不降级成匿名** —— 降级会让前端以为自己仍处于已
+    // 认证状态，症状是通知红点永远不动，比直接报错难查得多。
+    const payload = token ? await jwt.verify(token) : null
+    if (token && (!payload || typeof payload.sub !== 'string'))
+      return status(401, { message: 'error.unauthorized' })
+
+    // 两道控制是刻意冗余的。**闸门（下面 handler 里那道）才是安全边界**，因为只有
+    // 它能拦住匿名端显式传 `topics=*`；这里的默认值只是让匿名端从一开始就拿最小
+    // 集合，且加了新公开话题时自动跟上。
+    const anonymous = !payload
+    const topics = parseTopics(topicsParam, anonymous ? [...PUBLIC_TOPICS] : ['*'])
 
     let handler: (event: AppEvent) => void
     let heartbeat: ReturnType<typeof setInterval>
@@ -150,6 +170,10 @@ export default new Elysia({ prefix: '/events' })
           controller.enqueue(encoder.encode(': heartbeat\n\n'))
         }, 10 * 1000)
         handler = (event: AppEvent) => {
+          // 安全边界：匿名端无论请求什么 topic，都只能收到白名单内的。请求
+          // `topics=*` 也不例外 —— 这正是改造前那个漏洞的形态。
+          if (anonymous && !PUBLIC_TOPICS.has(event.topic))
+            return
           if (topics.some(p => matchesTopic(p, event.topic)))
             controller.enqueue(encoder.encode(`data: ${JSON.stringify(event)}\n\n`))
         }

@@ -2,9 +2,16 @@ import { t } from 'elysia'
 
 /**
  * 用户自发的 topic（`POST /events/publish` 与 WS `publish`）只给**后缀**，服务端
- * 拼成 `net.pbhh.custom.<username>.<后缀>`。校验后缀是为了不让用户把 topic 写成
- * `net.pbhh.post.created` 或 `app.bsky.feed.post` 去冒充系统事件与 atproto 事件
- * ——这是改名到 NSID 命名空间后新出现的伪造面。
+ * 拼成 `net.pbhh.custom.<username>.<后缀>`。
+ *
+ * **防冒充靠的是这层前缀嵌套，不是下面的语法校验。** 校验的 pattern 本身**接受**
+ * `net.pbhh.post.created` 与 `app.bsky.feed.post`（实测过，它们本来就是合法的点
+ * 分标识符）；挡住冒充的是「用户输入永远被裹在 `net.pbhh.custom.<他自己的用户名>.`
+ * 之后」，所以拼出来的 topic 不可能等于任何系统话题或 `app.bsky.*`。改这段代码
+ * 前先想清这一点：拿掉前缀嵌套，下面这个校验一点都拦不住。
+ *
+ * 那校验管什么？管**形状卫生**——拒掉空串、`*` / `a.*` 这类通配形状、前导或尾随
+ * 的 `-`，让自定义话题与系统话题长得一样规整。
  *
  * 语法与 atproto NSID 一致（点分、段首为字母数字、`-` 只能在段内），只多放开一
  * 个 `_`。用户名本身已不含下划线（用户名现在就是 `*.pbhh.net` 的 DNS label），
