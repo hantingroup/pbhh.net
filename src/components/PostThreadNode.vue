@@ -119,7 +119,7 @@ function expandDeeper() {
       <PostItem
         v-bind="postItemProps"
         expanded
-        replyable
+        repliable
         @reply="emit('reply', node.id)"
         @deleted="emit('deleted', node.id)"
         @quote-click="emit('quoteClick', $event)"

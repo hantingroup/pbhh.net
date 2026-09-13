@@ -22,7 +22,7 @@ const props = defineProps<{
   replyCount?: number
   liked: boolean
   expanded?: boolean
-  replyable?: boolean
+  repliable?: boolean
   disableUserLink?: boolean
   parentId?: number
   parentNickname?: string
@@ -87,7 +87,7 @@ async function confirmDelete() {
 }
 
 function handleReplyClick() {
-  if (props.expanded || props.replyable)
+  if (props.expanded || props.repliable)
     emit('reply')
   else
     router.push(`/post/${props.id}#reply`)
