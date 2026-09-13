@@ -51,5 +51,8 @@
     "typescript": "~5.9.3",
     "vite": "^7.3.1",
     "vue-tsc": "^3.1.5"
+  },
+  "patchedDependencies": {
+    "@atproto-labs/fetch-node@0.4.0": "patches/@atproto-labs%2Ffetch-node@0.4.0.patch"
   }
 }

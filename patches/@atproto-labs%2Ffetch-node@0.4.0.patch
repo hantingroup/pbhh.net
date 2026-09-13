@@ -1,0 +1,24 @@
+diff --git a/dist/dispatch.js b/dist/dispatch.js
+index 5cdc3b64820d0b0316facfc22996ede68bda1693..c5f6a474e33e975a98f7e7b1253f378875cf1dda 100644
+--- a/dist/dispatch.js
++++ b/dist/dispatch.js
+@@ -1,6 +1,16 @@
+-import { Agent as Undici6Agent } from 'undici_v6'; // NodeJS 22
+-import { Agent as Undici7Agent } from 'undici_v7'; // NodeJS 24
+-import { Agent as Undici8Agent } from 'undici_v8'; // NodeJS 26
++// NOTE(pbhh.net local patch): undici is loaded lazily instead of through static
++// `import` statements. undici@8 throws while its module body is evaluated under
++// Bun ("webidl.util.markAsUncloneable is not a function"), and a static import
++// would break *every* importer of this package on Bun — including runtimes that
++// never select the v8 branch. Selection below is unchanged on Node, and a
++// version that is genuinely unavailable now fails loudly when it is selected
++// rather than silently degrading to an incompatible Agent.
++const undici6Ns = await import('undici_v6').catch(() => undefined); // NodeJS 22
++const undici7Ns = await import('undici_v7').catch(() => undefined); // NodeJS 24
++const undici8Ns = await import('undici_v8').catch(() => undefined); // NodeJS 26
++const Undici6Agent = undici6Ns?.Agent ?? undici6Ns?.default?.Agent;
++const Undici7Agent = undici7Ns?.Agent ?? undici7Ns?.default?.Agent;
++const Undici8Agent = undici8Ns?.Agent ?? undici8Ns?.default?.Agent;
+ import { FetchRequestError, asRequest, } from '@atproto-labs/fetch';
+ import { compareVersions, parseVersion } from './util.js';
+ /**

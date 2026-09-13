@@ -43,6 +43,7 @@ settings:
     profile: 个人资料
     appearance: 外观设置
     bind: 平台绑定
+    atproto: atproto 绑定
     notifications: 通知设置
     hitokoto: 一言来源
   appearance:
@@ -216,6 +217,37 @@ bind:
   waitingHint: 验证码有效期 10 分钟
   polling: 等待绑定中…
   cancel: 取消
+  atproto:
+    title: atproto 绑定
+    bound: 已绑定
+    unbound: 未绑定
+    domainHandle: 你的 pbhh.net handle：
+    domainHandleHint: 把 Bluesky 里的 handle 改成它，你的主页就会显示在这个域名下。
+    currentHandle: 当前 atproto handle：
+    currentDid: DID：
+    intro: 填入你已有的 atproto handle（例如 alice.bsky.social），授权通过后就能把 <username>.pbhh.net 设成主页地址。
+    handleLabel: atproto handle
+    handlePlaceholder: alice.bsky.social
+    handleRequired: 请填写 atproto handle
+    handlePattern: handle 格式不正确，应形如 alice.bsky.social
+    bind: 开始绑定
+    redirectHint: 点击后会跳去你的 PDS 完成授权，然后自动回到本页。
+    unbind: 解绑
+    unbindConfirmTitle: 确认解绑 atproto？
+    unbindConfirmDescription: 如果你已经把自己的 Bluesky handle 改成了 {handle}，解绑会让它当场失效，Bluesky 会把你的 handle 打回原样。确定继续？
+    unbindFailed: 解绑失败，请稍后再试
+    loadFailed: 加载绑定状态失败，请稍后再试
+    boundSuccess: 绑定成功。
+    notConfigured: 本站尚未配置 atproto 客户端密钥，绑定功能暂不可用。
+    reasons:
+      accessDenied: 你在授权页点了「拒绝」。完成绑定必须先授权。
+      authorizeFailed: 连不上你的 PDS，或者填写的 handle 不存在，请检查 handle 是否正确。
+      callbackFailed: 授权回调处理失败，请重试。
+      stateExpired: 这次授权已过期（期间服务可能重启过），请重新发起绑定。
+      handleUnresolved: 授权成功，但没能从你的 PDS 读到 handle。
+      didTakenByOther: 这个 atproto 账号已经绑定了本站的另一个用户。
+      handleTakenByOther: 这个 handle 已经被本站的另一个用户绑定。
+      unknown: 绑定失败（{reason}）。
 room:
   title: 聊天室
   createPlaceholder: 新建聊天室名称

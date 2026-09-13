@@ -48,6 +48,7 @@ settings:
     profile: Profile
     appearance: Appearance
     bind: Account Linking
+    atproto: atproto
     notifications: Notifications
     hitokoto: Hitokoto Source
   appearance:
@@ -223,6 +224,46 @@ bind:
   waitingHint: The code is valid for 10 minutes
   polling: Waiting for linking...
   cancel: Cancel
+  atproto:
+    title: atproto linking
+    bound: Linked
+    unbound: Not linked
+    domainHandle: 'Your pbhh.net handle:'
+    domainHandleHint: >-
+      Point your Bluesky handle here and your profile will live under this domain.
+    currentHandle: 'Current atproto handle:'
+    currentDid: 'DID:'
+    intro: >-
+      Enter the atproto handle you already have (for example alice.bsky.social).
+      Once authorized you can set <username>.pbhh.net as your profile address.
+    handleLabel: atproto handle
+    handlePlaceholder: alice.bsky.social
+    handleRequired: Please enter your atproto handle
+    handlePattern: Invalid handle format. Expected something like alice.bsky.social
+    bind: Start linking
+    redirectHint: You will be sent to your PDS to authorize, then returned to this page.
+    unbind: Unlink
+    unbindConfirmTitle: Unlink atproto?
+    unbindConfirmDescription: >-
+      If you have already changed your Bluesky handle to {handle}, unlinking will
+      break it immediately and Bluesky will revert your handle. Continue?
+    unbindFailed: Failed to unlink. Please try again later.
+    loadFailed: Failed to load linking status. Please try again later.
+    boundSuccess: Linked successfully.
+    notConfigured: This site has no atproto client key configured, so linking is unavailable.
+    reasons:
+      accessDenied: You chose Deny on the authorization page. Authorization is required to link.
+      authorizeFailed: >-
+        Could not reach your PDS, or the handle you entered does not exist.
+        Please check the handle.
+      callbackFailed: Failed to process the authorization callback. Please try again.
+      stateExpired: >-
+        This authorization has expired (the service may have restarted in the
+        meantime). Please start linking again.
+      handleUnresolved: Authorization succeeded, but no handle could be read from your PDS.
+      didTakenByOther: That atproto account is already linked to another user on this site.
+      handleTakenByOther: That handle is already linked by another user on this site.
+      unknown: Linking failed ({reason}).
 room:
   title: Chat Rooms
   createPlaceholder: New room name

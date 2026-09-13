@@ -1,8 +1,10 @@
 <script setup lang="ts">
-import { Bell, Link, MonitorCog, Quote, User } from 'lucide-vue-next'
+import { AtSign, Bell, Link, MonitorCog, Quote, User } from 'lucide-vue-next'
 import { ref } from 'vue'
 import { useI18n } from 'vue-i18n'
+import { useRoute, useRouter } from 'vue-router'
 import { Separator } from '@/components/ui/separator'
+import SettingsAtproto from './settings/SettingsAtproto.vue'
 import SettingsBind from './settings/SettingsBind.vue'
 import SettingsHitokoto from './settings/SettingsHitokoto.vue'
 import SettingsNotifications from './settings/SettingsNotifications.vue'
@@ -10,20 +12,30 @@ import SettingsProfile from './settings/SettingsProfile.vue'
 import SettingsAppearance from './settings/SettingsTheme.vue'
 
 const { t } = useI18n()
+const route = useRoute()
+const router = useRouter()
 
-type Tab = 'profile' | 'appearance' | 'bind' | 'notifications' | 'hitokoto'
-const TABS: Tab[] = ['profile', 'appearance', 'bind', 'notifications', 'hitokoto']
+type Tab = 'profile' | 'appearance' | 'bind' | 'atproto' | 'notifications' | 'hitokoto'
+const TABS: Tab[] = ['profile', 'appearance', 'bind', 'atproto', 'notifications', 'hitokoto']
 
+/**
+ * atproto 的 OAuth 回调是**顶层跳转**回来的，只能带 query：
+ * `${SITE_ORIGIN}/settings?tab=atproto&atproto=bound`（server/modules/atproto/index.ts）。
+ * 站内切换仍然走 hash。两个来源都认，query 优先。
+ */
 function getTabFromHash(): Tab {
-  const hash = location.hash.slice(1) as Tab
-  return TABS.includes(hash) ? hash : 'profile'
+  const fromQuery = route.query.tab
+  const candidate = (typeof fromQuery === 'string' ? fromQuery : '') || location.hash.slice(1)
+  return (TABS as string[]).includes(candidate) ? (candidate as Tab) : 'profile'
 }
 
 const activeTab = ref<Tab>(getTabFromHash())
 
 function setTab(tab: Tab) {
   activeTab.value = tab
-  history.replaceState(history.state, '', `#${tab}`)
+  // 用 router.replace 而非 history.replaceState：后者传 fragment-only 的 URL 会
+  // **保留 search**，`?atproto=bound` 会残留到下次刷新、反复弹同一条结果。
+  router.replace({ path: '/settings', query: {}, hash: `#${tab}` })
 }
 </script>
 
@@ -46,6 +58,7 @@ function setTab(tab: Tab) {
           <User v-if="tab === 'profile'" class="size-4 shrink-0" />
           <MonitorCog v-else-if="tab === 'appearance'" class="size-4 shrink-0" />
           <Link v-else-if="tab === 'bind'" class="size-4 shrink-0" />
+          <AtSign v-else-if="tab === 'atproto'" class="size-4 shrink-0" />
           <Bell v-else-if="tab === 'notifications'" class="size-4 shrink-0" />
           <Quote v-else-if="tab === 'hitokoto'" class="size-4 shrink-0" />
           {{ t(`settings.tabs.${tab}`) }}
@@ -60,6 +73,7 @@ function setTab(tab: Tab) {
         <SettingsProfile v-if="activeTab === 'profile'" />
         <SettingsAppearance v-else-if="activeTab === 'appearance'" />
         <SettingsBind v-else-if="activeTab === 'bind'" />
+        <SettingsAtproto v-else-if="activeTab === 'atproto'" />
         <Suspense v-else-if="activeTab === 'notifications'">
           <SettingsNotifications />
           <template #fallback>
