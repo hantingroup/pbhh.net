@@ -1,4 +1,4 @@
-import { integer, primaryKey, sqliteTable, text } from 'drizzle-orm/sqlite-core'
+import { index, integer, primaryKey, sqliteTable, text } from 'drizzle-orm/sqlite-core'
 
 export type NotificationType = 'like' | 'reply' | 'post' | 'mail'
 export const NOTIFICATION_TYPES: NotificationType[] = ['like', 'reply', 'post', 'mail']
@@ -138,3 +138,55 @@ export const hitokoto = sqliteTable('hitokoto', {
   creator: text('creator').notNull().references(() => users.username),
   createdAt: integer('created_at', { mode: 'timestamp' }).notNull().$defaultFn(() => new Date()),
 })
+
+// ─── atproto ─────────────────────────────────────────────────────────────────
+// 不自建 PDS：用户带自己的 repo 来，这里只存「哪个本地账号对应哪个 DID」。
+
+export const atprotoIdentities = sqliteTable('atproto_identities', {
+  username: text('username').notNull().primaryKey().references(() => users.username),
+  did: text('did').notNull().unique(),
+  /**
+   * 最后一次观测到的 atproto handle（`alice.bsky.social`），仅作展示与重解析用。
+   * 刻意**不加唯一约束**：handle 在 atproto 里是全球唯一的，但我们这份是副本，
+   * 用户改 handle 后本行会过期，届时另一用户可能取走旧 handle —— 唯一约束会在
+   * 那次绑定时硬失败。查询一律走 `did` 或 `domainLabel`，唯一性买不到东西。
+   */
+  handle: text('handle').notNull(),
+  /**
+   * 用户认领的 `*.pbhh.net` 子域标签（`alice`），与上面的 atproto handle 分开存：
+   * 认领必须发生在用户去 Bluesky 改 handle **之前**（改的时候对方会来抓
+   * `/.well-known/atproto-did` 校验），所以认领后、改完前，两者并不相等。
+   * null = 未认领。
+   */
+  domainLabel: text('domain_label').unique(),
+  pdsUrl: text('pds_url').notNull(),
+  createdAt: integer('created_at', { mode: 'timestamp' }).notNull().$defaultFn(() => new Date()),
+})
+
+/** `sessionStore` 的落库实现。session 内含 DPoP 绑定的 token，按机密对待。 */
+export const atprotoOauthSessions = sqliteTable('atproto_oauth_sessions', {
+  did: text('did').notNull().primaryKey(),
+  session: text('session').notNull(),
+  updatedAt: integer('updated_at', { mode: 'timestamp' }).notNull().$defaultFn(() => new Date()),
+})
+
+/** `stateStore` 的落库实现，约 1h 后过期清理。 */
+export const atprotoOauthStates = sqliteTable('atproto_oauth_states', {
+  key: text('key').notNull().primaryKey(),
+  state: text('state').notNull(),
+  expiresAt: integer('expires_at', { mode: 'timestamp' }).notNull(),
+})
+
+/** JetStream 游标（`payload.seq`，inclusive）。kv 形态，便于将来多消费者共存。 */
+export const atprotoCursor = sqliteTable('atproto_cursor', {
+  key: text('key').notNull().primaryKey(),
+  value: text('value').notNull(),
+})
+
+/** JetStream 至少一次投递的幂等去重，按 `at://` URI。需按 `seenAt` 定期清理。 */
+export const atprotoSeen = sqliteTable('atproto_seen', {
+  uri: text('uri').notNull().primaryKey(),
+  seenAt: integer('seen_at', { mode: 'timestamp' }).notNull().$defaultFn(() => new Date()),
+}, table => [
+  index('atproto_seen_seen_at_idx').on(table.seenAt),
+])
