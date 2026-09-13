@@ -103,7 +103,7 @@ function applyUpdateState(payload: unknown) {
 }
 
 async function loadLogDates() {
-  const res = await fetch(`${API_BASE}/api/admin/log-dates`, { headers: authHeaders.value })
+  const res = await fetch(`${API_BASE}/admin/log-dates`, { headers: authHeaders.value })
   if (res.ok)
     logDates.value = await res.json()
 }
@@ -113,7 +113,7 @@ async function loadHistoryLogs(date: string) {
   historyLogs.value = []
   logPage.value = 0
 
-  const res = await fetch(`${API_BASE}/api/admin/logs/${date}`, { headers: authHeaders.value })
+  const res = await fetch(`${API_BASE}/admin/logs/${date}`, { headers: authHeaders.value })
   if (res.ok)
     historyLogs.value = await res.json()
 
@@ -122,7 +122,7 @@ async function loadHistoryLogs(date: string) {
 }
 
 async function loadUpdateStatus() {
-  const res = await fetch(`${API_BASE}/api/admin/update`, { headers: authHeaders.value })
+  const res = await fetch(`${API_BASE}/admin/update`, { headers: authHeaders.value })
   if (!res.ok)
     return
 
@@ -142,7 +142,7 @@ async function runUpdate() {
   autoScroll.value = true
 
   try {
-    const res = await fetch(`${API_BASE}/api/admin/update`, {
+    const res = await fetch(`${API_BASE}/admin/update`, {
       method: 'POST',
       headers: authHeaders.value,
     })
@@ -224,7 +224,7 @@ watch(() => updateState.value?.running, async (running, previous) => {
 function connectWS() {
   const token = localStorage.getItem('token') ?? ''
 
-  ws = new WebSocket(`${API_BASE.replace(/^http/, 'ws')}/api/admin/ws?token=${encodeURIComponent(token)}`)
+  ws = new WebSocket(`${API_BASE.replace(/^http/, 'ws')}/admin/ws?token=${encodeURIComponent(token)}`)
   ws.onmessage = ({ data }) => {
     try {
       const parsed = JSON.parse(data)

@@ -631,7 +631,7 @@ async function loadRoom() {
   }
 
   const origin = API_BASE.replace(/^http/, 'ws')
-  ws = new WebSocket(`${origin}/api/rooms/ws/${props.id}?token=${encodeURIComponent(token)}`)
+  ws = new WebSocket(`${origin}/rooms/ws/${props.id}?token=${encodeURIComponent(token)}`)
 
   ws.onopen = () => {
     pingInterval = setInterval(() => {

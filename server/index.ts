@@ -3,7 +3,7 @@ import { Elysia } from 'elysia'
 import { mailServer } from './modules/mail/server'
 import './modules/admin/logger'
 
-const app = new Elysia({ prefix: '/api' })
+const app = new Elysia()
   .use(cors())
   .use(import('./modules/auth'))
   .use(import('./modules/events'))

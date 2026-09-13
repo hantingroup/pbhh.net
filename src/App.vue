@@ -11,7 +11,7 @@ let sse: EventSource | null = null
 onMounted(() => {
   if (!user.value)
     return
-  sse = new EventSource(`${API_BASE}/api/events/sse`)
+  sse = new EventSource(`${API_BASE}/events/sse`)
   sse.onmessage = (e) => {
     const event = JSON.parse(e.data) as { topic: string, payload: { recipientUsername?: string } }
     if (event.topic.startsWith('notify.') && event.payload.recipientUsername === user.value?.username)
@@ -31,10 +31,11 @@ function getViewport(): HTMLElement | null {
 const scrollPositions = new Map<string, number>()
 const router = useRouter()
 
-const keepAlivePaths = ['/post', /^\/@/]
+const keepAlivePatterns = [/^\/post$/, /^\/@/]
+const keepAliveIncludes = ['PostPage', 'UserPage']
 
 function isKeepAlive(path: string) {
-  return keepAlivePaths.some(p => typeof p === 'string' ? p === path : p.test(path))
+  return keepAlivePatterns.some(pattern => pattern.test(path))
 }
 
 router.beforeEach((_, from) => {
@@ -66,7 +67,7 @@ router.afterEach((to) => {
     <ScrollArea class="h-[calc(100vh-4rem)] w-full">
       <main class="flex flex-col items-center min-h-[calc(100vh-4rem)]">
         <RouterView v-slot="{ Component }">
-          <KeepAlive include="PostPage,UserPage">
+          <KeepAlive :include="keepAliveIncludes">
             <component :is="Component" />
           </KeepAlive>
         </RouterView>
