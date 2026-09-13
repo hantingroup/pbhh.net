@@ -5,6 +5,7 @@ import { requireAuth } from '../auth/guard'
 import { jwtPlugin } from '../jwt'
 import { getOAuthClient, isAtprotoConfigured, revokeSession, sweepExpiredStates } from './client'
 import { HANDLE_DOMAIN, SITE_ORIGIN } from './config'
+import { getJetstreamStatus, scheduleJetstreamReconnect, startJetstream } from './jetstream'
 import * as AtprotoService from './service'
 
 const SWEEP_INTERVAL_MS = 15 * 60 * 1000
@@ -13,6 +14,10 @@ const SWEEP_INTERVAL_MS = 15 * 60 * 1000
 const pendingStates = new Map<string, { mode: 'bind', username: string, expiresAt: number }>()
 
 setInterval(sweepExpiredStates, SWEEP_INTERVAL_MS).unref?.()
+
+// 读路径（JetStream 入站）。放在模块加载处：没有已绑定身份时它自己就返回，
+// 所以本地开发不会真去连生产 JetStream。
+startJetstream()
 
 async function resolveHandle(session: OAuthSession): Promise<string | undefined> {
   try {
@@ -139,6 +144,11 @@ export default new Elysia()
       return redirect(backToSettings({ atproto: 'error', reason: result.reason }))
     }
 
+    // 新绑定的 repo 要进 `dids` 订阅列表。**刻意不通过 `bus` 广播这件事** ——
+    // `bus.on('event')` 会把事件投给所有 webhook 与已认证的 WS/SSE 订阅者，等于把
+    // 「谁绑定了/谁解绑了」泄露给所有人。
+    scheduleJetstreamReconnect()
+
     return redirect(backToSettings({ atproto: 'bound' }))
   }, {
     query: t.Object({
@@ -167,5 +177,14 @@ export default new Elysia()
     const did = AtprotoService.unbindIdentity(username)
     if (did)
       await revokeSession(did)
+    scheduleJetstreamReconnect()
     return status(204, null)
   })
+  /**
+   * 读路径的可观测性。`console.*` 已被 `admin/logger.ts` 全量捕获（`/admin/log` 可看），
+   * 但连接状态是「看一眼」的需求，翻日志太慢。
+   *
+   * **不回传 `dids` 原文** —— DID 本身是公开信息，但没必要把它们一次性交给任意已认证
+   * 用户；个数足以判断「该不该连着」。
+   */
+  .get('/me/bindings/atproto/jetstream', () => getJetstreamStatus())
