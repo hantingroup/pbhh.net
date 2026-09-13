@@ -4,14 +4,14 @@ import { useRouter } from 'vue-router'
 import NavBrand from '@/components/NavBrand.vue'
 import NavUser from '@/components/NavUser.vue'
 import { ScrollArea } from '@/components/ui/scroll-area'
-import { unreadCount, user } from '@/lib/api'
+import { API_BASE, unreadCount, user } from '@/lib/api'
 
 let sse: EventSource | null = null
 
 onMounted(() => {
   if (!user.value)
     return
-  sse = new EventSource(`${window.location.origin}/api/events/sse`)
+  sse = new EventSource(`${API_BASE}/api/events/sse`)
   sse.onmessage = (e) => {
     const event = JSON.parse(e.data) as { topic: string, payload: { recipientUsername?: string } }
     if (event.topic.startsWith('notify.') && event.payload.recipientUsername === user.value?.username)

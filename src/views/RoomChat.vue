@@ -9,7 +9,7 @@ import { Input } from '@/components/ui/input'
 import { ScrollArea } from '@/components/ui/scroll-area'
 import { Textarea } from '@/components/ui/textarea'
 import UserAvatar from '@/components/UserAvatar.vue'
-import { api, user } from '@/lib/api'
+import { api, API_BASE, user } from '@/lib/api'
 import { makeReplyPreview, renderRoomMessageHtml } from '@/lib/roomMessage'
 import NotFound from '@/views/NotFound.vue'
 
@@ -630,7 +630,7 @@ async function loadRoom() {
     scrollToBottom()
   }
 
-  const origin = window.location.origin.replace(/^http/, 'ws')
+  const origin = API_BASE.replace(/^http/, 'ws')
   ws = new WebSocket(`${origin}/api/rooms/ws/${props.id}?token=${encodeURIComponent(token)}`)
 
   ws.onopen = () => {

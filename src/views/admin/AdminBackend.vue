@@ -2,7 +2,7 @@
 import type { LogEntry } from './AdminLog.vue'
 import { computed, onMounted, onUnmounted, ref, watch } from 'vue'
 import { Button } from '@/components/ui/button'
-import { user } from '@/lib/api'
+import { API_BASE, user } from '@/lib/api'
 import { hasCapability } from '@/lib/capabilities'
 import AdminLog from './AdminLog.vue'
 
@@ -103,7 +103,7 @@ function applyUpdateState(payload: unknown) {
 }
 
 async function loadLogDates() {
-  const res = await fetch('/api/admin/log-dates', { headers: authHeaders.value })
+  const res = await fetch(`${API_BASE}/api/admin/log-dates`, { headers: authHeaders.value })
   if (res.ok)
     logDates.value = await res.json()
 }
@@ -113,7 +113,7 @@ async function loadHistoryLogs(date: string) {
   historyLogs.value = []
   logPage.value = 0
 
-  const res = await fetch(`/api/admin/logs/${date}`, { headers: authHeaders.value })
+  const res = await fetch(`${API_BASE}/api/admin/logs/${date}`, { headers: authHeaders.value })
   if (res.ok)
     historyLogs.value = await res.json()
 
@@ -122,7 +122,7 @@ async function loadHistoryLogs(date: string) {
 }
 
 async function loadUpdateStatus() {
-  const res = await fetch('/api/admin/update', { headers: authHeaders.value })
+  const res = await fetch(`${API_BASE}/api/admin/update`, { headers: authHeaders.value })
   if (!res.ok)
     return
 
@@ -142,7 +142,7 @@ async function runUpdate() {
   autoScroll.value = true
 
   try {
-    const res = await fetch('/api/admin/update', {
+    const res = await fetch(`${API_BASE}/api/admin/update`, {
       method: 'POST',
       headers: authHeaders.value,
     })
@@ -223,9 +223,8 @@ watch(() => updateState.value?.running, async (running, previous) => {
 
 function connectWS() {
   const token = localStorage.getItem('token') ?? ''
-  const protocol = location.protocol === 'https:' ? 'wss:' : 'ws:'
 
-  ws = new WebSocket(`${protocol}//${location.host}/api/admin/ws?token=${encodeURIComponent(token)}`)
+  ws = new WebSocket(`${API_BASE.replace(/^http/, 'ws')}/api/admin/ws?token=${encodeURIComponent(token)}`)
   ws.onmessage = ({ data }) => {
     try {
       const parsed = JSON.parse(data)

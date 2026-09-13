@@ -6,7 +6,10 @@ import { ref } from 'vue'
 
 export const TOKEN = useStorage('token', '')
 
-export const { api } = treaty<App>(window.location.origin, {
+// In production the API lives on its own subdomain; in dev the vite proxy serves /api
+export const API_BASE = import.meta.env.DEV ? window.location.origin : 'https://api.pbhh.net'
+
+export const { api } = treaty<App>(API_BASE, {
   headers: () => ({
     Authorization: TOKEN.value && `Bearer ${TOKEN.value}`,
   }),

@@ -4,7 +4,7 @@ import { Translation, useI18n } from 'vue-i18n'
 import PostCompose from '@/components/PostCompose.vue'
 import PostList from '@/components/PostList.vue'
 import { useScrollRestore } from '@/composables/useScrollRestore'
-import { user } from '@/lib/api'
+import { API_BASE, user } from '@/lib/api'
 
 defineOptions({ name: 'PostPage' })
 
@@ -15,7 +15,7 @@ const postList = ref<InstanceType<typeof PostList> | null>(null)
 let sse: EventSource | null = null
 
 function openSse() {
-  sse = new EventSource(`${window.location.origin}/api/events/sse`)
+  sse = new EventSource(`${API_BASE}/api/events/sse`)
   sse.onmessage = (e) => {
     const { topic } = JSON.parse(e.data) as { topic: string }
     if (topic === 'post.created')

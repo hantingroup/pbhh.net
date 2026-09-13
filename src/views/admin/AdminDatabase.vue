@@ -5,6 +5,7 @@ import { computed, onMounted, ref, watch, watchEffect } from 'vue'
 import { Button } from '@/components/ui/button'
 import { DropdownMenu, DropdownMenuContent, DropdownMenuRadioGroup, DropdownMenuRadioItem, DropdownMenuTrigger } from '@/components/ui/dropdown-menu'
 import { Spinner } from '@/components/ui/spinner'
+import { API_BASE } from '@/lib/api'
 
 type Row = Record<string, unknown>
 
@@ -68,7 +69,7 @@ const authHeaders = computed(() => ({
 }))
 
 async function loadTables() {
-  const res = await fetch('/api/admin/tables', { headers: authHeaders.value })
+  const res = await fetch(`${API_BASE}/api/admin/tables`, { headers: authHeaders.value })
   if (res.ok) {
     tables.value = await res.json()
     if (tables.value.length)
@@ -83,7 +84,7 @@ async function loadTable() {
   insertDraft.value = null
   dbPage.value = 0
   loadingTable.value = true
-  const res = await fetch(`/api/admin/db/${selectedTable.value}`, { headers: authHeaders.value })
+  const res = await fetch(`${API_BASE}/api/admin/db/${selectedTable.value}`, { headers: authHeaders.value })
   if (res.ok) {
     const data = await res.json()
     tableRows.value = data.rows
@@ -104,7 +105,7 @@ async function deleteRow(row: Row) {
     return
   const pk: Row = {}
   for (const col of tablePks.value) pk[col] = row[col]
-  const res = await fetch(`/api/admin/db/${selectedTable.value}`, {
+  const res = await fetch(`${API_BASE}/api/admin/db/${selectedTable.value}`, {
     method: 'DELETE',
     headers: { ...authHeaders.value, 'Content-Type': 'application/json' },
     body: JSON.stringify(pk),
@@ -137,7 +138,7 @@ async function saveEdit(row: Row) {
     if (!tablePks.value.includes(col))
       values[col] = editDraft.value[col]
   }
-  const res = await fetch(`/api/admin/db/${selectedTable.value}`, {
+  const res = await fetch(`${API_BASE}/api/admin/db/${selectedTable.value}`, {
     method: 'PATCH',
     headers: { ...authHeaders.value, 'Content-Type': 'application/json' },
     body: JSON.stringify({ pk, values }),
@@ -166,7 +167,7 @@ function cancelInsert() {
 async function saveInsert() {
   if (!props.canEdit || !insertDraft.value)
     return
-  const res = await fetch(`/api/admin/db/${selectedTable.value}`, {
+  const res = await fetch(`${API_BASE}/api/admin/db/${selectedTable.value}`, {
     method: 'POST',
     headers: { ...authHeaders.value, 'Content-Type': 'application/json' },
     body: JSON.stringify(insertDraft.value),
