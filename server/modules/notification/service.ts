@@ -3,6 +3,7 @@ import { and, count, desc, eq, inArray } from 'drizzle-orm'
 import { alias } from 'drizzle-orm/sqlite-core'
 import { db, emails, notifications, posts, userBindings, users } from 'server/database'
 import { bus } from '../events/bus'
+import { deliverToUser } from '../events/deliver'
 import * as FollowService from '../follow/service'
 import { isPrefEnabled } from './prefs'
 
@@ -53,7 +54,7 @@ function onPostLiked({ postId, actorUsername, liked }: AppEventMap['net.pbhh.pos
     actorUsername,
     postId,
   }).run()
-  bus.publish('net.pbhh.notify.post.liked', {
+  deliverToUser(post.username, 'net.pbhh.notify.post.liked', {
     recipientUsername: post.username,
     recipientBindings: getBindings(post.username),
     actorUsername,
@@ -80,7 +81,7 @@ function onPostCreated({ username: actorUsername, postId }: AppEventMap['net.pbh
       actorUsername,
       postId,
     }).run()
-    bus.publish('net.pbhh.notify.post.created', {
+    deliverToUser(username, 'net.pbhh.notify.post.created', {
       recipientUsername: username,
       recipientBindings: getBindings(username),
       actorUsername,
@@ -115,7 +116,7 @@ function onPostReplied({ parentId, actorUsername, replyId }: AppEventMap['net.pb
     postId: parentId,
     replyId,
   }).run()
-  bus.publish('net.pbhh.notify.post.replied', {
+  deliverToUser(post.username, 'net.pbhh.notify.post.replied', {
     recipientUsername: post.username,
     recipientBindings: getBindings(post.username),
     actorUsername,

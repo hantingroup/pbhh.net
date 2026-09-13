@@ -1,87 +1,9 @@
-import type { AppEvent } from './bus'
-import { Buffer } from 'node:buffer'
 import { Elysia, t } from 'elysia'
 import { requireAuth } from '../auth/guard'
 import { jwtPlugin } from '../jwt'
 import { bus } from './bus'
+import { clearWebhook, getSubscriber, registerSse, registerWs, setWebhook, unregister } from './deliver'
 import { isValidTopicSuffix, pushBody, subscribeBody } from './model'
-
-// ─── Webhook ─────────────────────────────────────────────────────────────────
-
-const MAX_FAILURES = 5
-
-interface WebhookSub {
-  url: string
-  topics: string[]
-  failures: number
-}
-
-const webhooks = new Map<string, WebhookSub>()
-
-function matchesTopic(pattern: string, topic: string): boolean {
-  if (pattern === '*')
-    return true
-  if (pattern.endsWith('.*')) {
-    const prefix = pattern.slice(0, -2)
-    return topic === prefix || topic.startsWith(`${prefix}.`)
-  }
-  return pattern === topic
-}
-
-async function deliver(username: string, sub: WebhookSub, event: AppEvent, attempt = 1): Promise<void> {
-  const auth = `Basic ${Buffer.from(`${username}:`).toString('base64')}`
-  try {
-    const res = await fetch(sub.url, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json', 'Authorization': auth },
-      body: JSON.stringify(event),
-    })
-    if (!res.ok)
-      throw new Error(`HTTP ${res.status}`)
-    sub.failures = 0
-  }
-  catch (err) {
-    if (attempt < 3) {
-      await new Promise(r => setTimeout(r, 1000 * attempt))
-      return deliver(username, sub, event, attempt + 1)
-    }
-    sub.failures++
-    if (sub.failures >= MAX_FAILURES) {
-      webhooks.delete(username)
-      console.error(`[webhook:${username}] removed after ${MAX_FAILURES} consecutive failures`)
-      return
-    }
-    console.error(`[webhook:${username}] delivery failed (failures=${sub.failures}):`, err)
-  }
-}
-
-// ─── WS clients ──────────────────────────────────────────────────────────────
-
-interface WsClient {
-  username: string
-  topics: string[]
-  send: (data: string) => void
-}
-
-const wsClients = new Map<object, WsClient>()
-
-// ─── Event dispatch ───────────────────────────────────────────────────────────
-
-bus.on('event', (event: AppEvent) => {
-  const msg = JSON.stringify(event)
-
-  for (const [username, sub] of webhooks) {
-    if (sub.topics.some(p => matchesTopic(p, event.topic))) {
-      console.info(`[webhook:${username}] delivering topic=${event.topic} to ${sub.url}`)
-      deliver(username, sub, event)
-    }
-  }
-
-  for (const client of wsClients.values()) {
-    if (client.topics.some(p => matchesTopic(p, event.topic)))
-      client.send(msg)
-  }
-})
 
 // ─── Routes ───────────────────────────────────────────────────────────────────
 
@@ -100,6 +22,9 @@ const streamQuery = t.Object({
  * `app.bsky.*` 刻意不进：它内容本身是公开的，但一旦放进来，本站就成了「按 DID
  * 抓取本站用户 Bluesky 帖」的稳定公开接口。题壁流的实时刷新不需要它 —— 镜像成功
  * 后会补发本地 `net.pbhh.post.created`（见 jetstream.ts）。
+ *
+ * 通知不在这个列表里，也不需要：它们根本不走总线（见 `deliver.ts` 的
+ * `deliverToUser`），匿名连接没有 username，收不到。
  */
 const PUBLIC_TOPICS = new Set([
   'net.pbhh.post.created',
@@ -123,18 +48,16 @@ export default new Elysia({ prefix: '/events' })
         ws.close()
         return
       }
-      const username = payload.sub
 
-      const client: WsClient = {
-        username,
+      registerWs(ws.raw, {
+        username: payload.sub,
         topics: parseTopics(topics),
         send: data => ws.send(data),
-      }
-      wsClients.set(ws.raw, client)
+      })
     },
     message(ws, msg) {
-      const client = wsClients.get(ws.raw)
-      if (!client)
+      const client = getSubscriber(ws.raw)
+      if (!client?.username)
         return
       if (typeof msg !== 'object' || msg === null || (msg as any).type !== 'publish')
         return
@@ -144,7 +67,7 @@ export default new Elysia({ prefix: '/events' })
       bus.publish(`net.pbhh.custom.${client.username}.${topic}`, payload)
     },
     close(ws) {
-      wsClients.delete(ws.raw)
+      unregister(ws.raw)
     },
   })
   .get('/sse', async ({ query, jwt, status }) => {
@@ -156,32 +79,41 @@ export default new Elysia({ prefix: '/events' })
     if (token && (!payload || typeof payload.sub !== 'string'))
       return status(401, { message: 'error.unauthorized' })
 
-    // 两道控制是刻意冗余的。**闸门（下面 handler 里那道）才是安全边界**，因为只有
-    // 它能拦住匿名端显式传 `topics=*`；这里的默认值只是让匿名端从一开始就拿最小
-    // 集合，且加了新公开话题时自动跟上。
-    const anonymous = !payload
+    // 匿名连接没有 username，因此在投递层收不到任何点对点事件 —— 也就是收不到通知。
+    const username = payload && typeof payload.sub === 'string' ? payload.sub : undefined
+    const anonymous = !username
+
+    // 两道控制是刻意冗余的。**闸门（`allow`）才是安全边界**，因为只有它能拦住匿名
+    // 端显式传 `topics=*`；这里的默认值只是让匿名端从一开始就拿最小集合，且加了新
+    // 公开话题时自动跟上。
     const topics = parseTopics(topicsParam, anonymous ? [...PUBLIC_TOPICS] : ['*'])
 
-    let handler: (event: AppEvent) => void
     let heartbeat: ReturnType<typeof setInterval>
+    let key: object
     const stream = new ReadableStream({
       start(controller) {
         heartbeat = setInterval(() => {
           controller.enqueue(encoder.encode(': heartbeat\n\n'))
         }, 10 * 1000)
-        handler = (event: AppEvent) => {
-          // 安全边界：匿名端无论请求什么 topic，都只能收到白名单内的。请求
-          // `topics=*` 也不例外 —— 这正是改造前那个漏洞的形态。
-          if (anonymous && !PUBLIC_TOPICS.has(event.topic))
-            return
-          if (topics.some(p => matchesTopic(p, event.topic)))
-            controller.enqueue(encoder.encode(`data: ${JSON.stringify(event)}\n\n`))
-        }
-        bus.on('event', handler)
+        // controller 本身就是这条连接的身份，不必另造一个 key。
+        key = controller
+        registerSse(controller, {
+          username,
+          topics,
+          allow: anonymous ? (topic: string) => PUBLIC_TOPICS.has(topic) : undefined,
+          send: (data) => {
+            try {
+              controller.enqueue(encoder.encode(`data: ${data}\n\n`))
+            }
+            catch {
+              // 连接已关闭；注销由下面的 cancel 负责。
+            }
+          },
+        })
       },
       cancel() {
         clearInterval(heartbeat)
-        bus.off('event', handler)
+        unregister(key)
       },
     })
     return new Response(stream, {
@@ -194,11 +126,7 @@ export default new Elysia({ prefix: '/events' })
   }, { query: streamQuery })
   .use(requireAuth)
   .post('/subscribe', ({ username, body }) => {
-    webhooks.set(username, {
-      url: body.url,
-      topics: body.topics ?? ['*'],
-      failures: 0,
-    })
+    setWebhook(username, body.url, body.topics ?? ['*'])
     return { ok: true }
   }, {
     body: subscribeBody,
@@ -207,7 +135,7 @@ export default new Elysia({ prefix: '/events' })
     },
   })
   .delete('/subscribe', ({ username }) => {
-    webhooks.delete(username)
+    clearWebhook(username)
     return { ok: true }
   })
   .post('/publish', ({ username, body }) => {

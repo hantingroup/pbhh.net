@@ -2,7 +2,7 @@ import process from 'node:process'
 import { eq, sql } from 'drizzle-orm'
 import nodemailer from 'nodemailer'
 import { db, emails, notifications, users } from 'server/database'
-import { bus } from '../events/bus'
+import { deliverToUser } from '../events/deliver'
 import { isPrefEnabled } from '../notification/prefs'
 
 interface ResolvedRecipient {
@@ -294,7 +294,7 @@ export async function deliverMailToUser(username: string, fromAddress: string, s
     emailId: email.id,
   })
 
-  bus.publish('net.pbhh.notify.mail.received', {
+  deliverToUser(username, 'net.pbhh.notify.mail.received', {
     recipientUsername: username,
     emailId: email.id,
     fromAddress: email.fromAddress,
