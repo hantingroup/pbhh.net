@@ -51,7 +51,9 @@ async function submit() {
   sending.value = false
 
   if (error) {
-    const key = error.value?.message
+    // 401 的 body 是裸字符串 'Unauthorized'，没有 message 字段。
+    const err = error.value
+    const key = err && typeof err === 'object' ? err.message : undefined
     errorMessage.value = key && te(key) ? t(key) : t('mail.sendFailed')
     return
   }
