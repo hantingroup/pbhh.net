@@ -28,7 +28,7 @@ function getBindings(username: string): Record<string, string> {
   )
 }
 
-function onPostLiked({ postId, actorUsername, liked }: AppEventMap['post.liked']) {
+function onPostLiked({ postId, actorUsername, liked }: AppEventMap['net.pbhh.post.liked']) {
   if (!liked) {
     db.delete(notifications).where(and(
       eq(notifications.type, 'like'),
@@ -53,7 +53,7 @@ function onPostLiked({ postId, actorUsername, liked }: AppEventMap['post.liked']
     actorUsername,
     postId,
   }).run()
-  bus.publish('notify.post.liked', {
+  bus.publish('net.pbhh.notify.post.liked', {
     recipientUsername: post.username,
     recipientBindings: getBindings(post.username),
     actorUsername,
@@ -64,7 +64,7 @@ function onPostLiked({ postId, actorUsername, liked }: AppEventMap['post.liked']
   })
 }
 
-function onPostCreated({ username: actorUsername, postId }: AppEventMap['post.created']) {
+function onPostCreated({ username: actorUsername, postId }: AppEventMap['net.pbhh.post.created']) {
   const actor = getActor(actorUsername)
   const post = db
     .select({ content: posts.content })
@@ -80,7 +80,7 @@ function onPostCreated({ username: actorUsername, postId }: AppEventMap['post.cr
       actorUsername,
       postId,
     }).run()
-    bus.publish('notify.post.created', {
+    bus.publish('net.pbhh.notify.post.created', {
       recipientUsername: username,
       recipientBindings: getBindings(username),
       actorUsername,
@@ -92,7 +92,7 @@ function onPostCreated({ username: actorUsername, postId }: AppEventMap['post.cr
   }
 }
 
-function onPostReplied({ parentId, actorUsername, replyId }: AppEventMap['post.replied']) {
+function onPostReplied({ parentId, actorUsername, replyId }: AppEventMap['net.pbhh.post.replied']) {
   const post = db
     .select({ username: posts.username, content: posts.content })
     .from(posts)
@@ -115,7 +115,7 @@ function onPostReplied({ parentId, actorUsername, replyId }: AppEventMap['post.r
     postId: parentId,
     replyId,
   }).run()
-  bus.publish('notify.post.replied', {
+  bus.publish('net.pbhh.notify.post.replied', {
     recipientUsername: post.username,
     recipientBindings: getBindings(post.username),
     actorUsername,
@@ -129,11 +129,11 @@ function onPostReplied({ parentId, actorUsername, replyId }: AppEventMap['post.r
 }
 
 bus.on('event', (event: AppEvent) => {
-  if (event.topic === 'post.liked')
+  if (event.topic === 'net.pbhh.post.liked')
     onPostLiked(event.payload)
-  else if (event.topic === 'post.created')
+  else if (event.topic === 'net.pbhh.post.created')
     onPostCreated(event.payload)
-  else if (event.topic === 'post.replied')
+  else if (event.topic === 'net.pbhh.post.replied')
     onPostReplied(event.payload)
 })
 

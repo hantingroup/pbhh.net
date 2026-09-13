@@ -4,7 +4,7 @@ import { Elysia, t } from 'elysia'
 import { requireAuth } from '../auth/guard'
 import { jwtPlugin } from '../jwt'
 import { bus } from './bus'
-import { pushBody, subscribeBody } from './model'
+import { isValidTopicSuffix, pushBody, subscribeBody } from './model'
 
 // ─── Webhook ─────────────────────────────────────────────────────────────────
 
@@ -124,9 +124,9 @@ export default new Elysia({ prefix: '/events' })
       if (typeof msg !== 'object' || msg === null || (msg as any).type !== 'publish')
         return
       const { topic, payload } = msg as { type: string, topic?: unknown, payload?: unknown }
-      if (typeof topic !== 'string' || !topic)
+      if (typeof topic !== 'string' || !isValidTopicSuffix(topic))
         return
-      bus.publish(`custom.${client.username}.${topic}`, payload)
+      bus.publish(`net.pbhh.custom.${client.username}.${topic}`, payload)
     },
     close(ws) {
       wsClients.delete(ws.raw)
@@ -187,7 +187,7 @@ export default new Elysia({ prefix: '/events' })
     return { ok: true }
   })
   .post('/publish', ({ username, body }) => {
-    bus.publish(`custom.${username}.${body.topic}`, body.payload)
+    bus.publish(`net.pbhh.custom.${username}.${body.topic}`, body.payload)
     return { ok: true }
   }, {
     body: pushBody,

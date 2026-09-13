@@ -30,7 +30,7 @@ export default new Elysia()
   .use(requireAuth)
   .post('/posts', ({ body, status, username }) => {
     const postId = PostService.create(username, body.content, body.title)
-    bus.publish('post.created', { username, postId })
+    bus.publish('net.pbhh.post.created', { username, postId })
     return status(201, {})
   }, {
     body: createPostBody,
@@ -50,7 +50,7 @@ export default new Elysia()
     const result = PostService.toggleLike(Number(params.id), username)
     if (result === null)
       return status(404, { message: 'error.postNotFound' })
-    bus.publish('post.liked', {
+    bus.publish('net.pbhh.post.liked', {
       postId: Number(params.id),
       actorUsername: username,
       liked: result,
@@ -62,7 +62,7 @@ export default new Elysia()
     if (!parentExists)
       return status(404, { message: 'error.postNotFound' })
     const replyId = PostService.create(username, body.content, undefined, Number(params.id))
-    bus.publish('post.replied', {
+    bus.publish('net.pbhh.post.replied', {
       parentId: Number(params.id),
       actorUsername: username,
       replyId,

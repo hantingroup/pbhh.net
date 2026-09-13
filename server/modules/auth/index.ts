@@ -21,7 +21,7 @@ export default new Elysia()
         ? status(409, { message: 'error.usernameReserved' })
         : status(409, { message: 'error.usernameExists' })
     }
-    bus.publish('user.registered', { username: result.username })
+    bus.publish('net.pbhh.user.registered', { username: result.username })
     return status(201, { token: await jwt.sign({ sub: result.username }) })
   }, { body: signUpBody })
   .use(optionalAuth)

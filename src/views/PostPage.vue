@@ -18,7 +18,7 @@ function openSse() {
   sse = new EventSource(`${API_BASE}/events/sse`)
   sse.onmessage = (e) => {
     const { topic } = JSON.parse(e.data) as { topic: string }
-    if (topic === 'post.created')
+    if (topic === 'net.pbhh.post.created')
       postList.value?.reload()
   }
 }

@@ -14,7 +14,7 @@ onMounted(() => {
   sse = new EventSource(`${API_BASE}/events/sse`)
   sse.onmessage = (e) => {
     const event = JSON.parse(e.data) as { topic: string, payload: { recipientUsername?: string } }
-    if (event.topic.startsWith('notify.') && event.payload.recipientUsername === user.value?.username)
+    if (event.topic.startsWith('net.pbhh.notify.') && event.payload.recipientUsername === user.value?.username)
       unreadCount.value++
   }
 })
