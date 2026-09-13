@@ -25,8 +25,30 @@ const SCOPE = 'atproto'
 const handleResolver = new AtprotoHandleResolver({
   fetch: globalThis.fetch,
   resolveTxt: async (domain: string) => {
-    const records = await dns.resolveTxt(domain)
-    return records.map(parts => parts.join(''))
+    try {
+      const records = await dns.resolveTxt(domain)
+      return records.map(parts => parts.join(''))
+    }
+    catch (err) {
+      // `resolveTxt` 的契约是「查不到就返回 null」，库的 TSDoc 写得很清楚：
+      // "Return `null` if the hostname successfully does not resolve to a valid
+      // DID."。但 `node:dns` 查不到时是**抛错**：NXDOMAIN/只有别的记录类型
+      // 是 ENOTFOUND，名字存在但没有 TXT 是 ENODATA。这两种都属于「成功地解析
+      // 出没有」，必须还原成 null。
+      //
+      // 为什么这个还原是**必需**的，而不是锦上添花：`AtprotoHandleResolver`
+      // 并行发起 DNS 与 HTTPS 两个请求、先 await DNS，而它只给 HTTPS 那个挂了
+      // `.catch(noop)`，await DNS 的这行没有兜底。所以这里一抛错，整个解析就炸
+      // —— 哪怕 HTTPS 那条路早就取到了 DID。Bluesky 的 `*.bsky.social` 一律用
+      // HTTPS 发布 DID、不设 `_atproto` TXT，于是这个抛错会让**每一个** Bluesky
+      // 用户都绑不上，且报出的还是「handle 不存在」这种误导性原因。
+      const code = (err as NodeJS.ErrnoException).code
+      if (code !== 'ENOTFOUND' && code !== 'ENODATA')
+        console.error(`[atproto] DNS TXT lookup for ${domain} failed unexpectedly (${code}):`, err)
+      // 其余错误码（超时、SERVFAIL…）同样返回 null 而不抛：HTTPS 那条路仍然是
+      // 有效的，DNS 只是兜底，不该因为兜底失败而拖垮主路径。
+      return null
+    }
   },
 })
 
