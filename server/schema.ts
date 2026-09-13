@@ -36,7 +36,29 @@ export const posts = sqliteTable('posts', {
   username: text('username').notNull().references(() => users.username),
   createdAt: integer('created_at', { mode: 'timestamp' }).notNull().$defaultFn(() => new Date()),
   deleted: integer('deleted', { mode: 'boolean' }).notNull().default(false),
-})
+  /**
+   * 对应 atproto 记录地址。本站发布的是 `at://<did>/app.bsky.feed.post/pbhh-<id>`
+   * （rkey 故意做成确定性的，见 `modules/atproto/outbox.ts`）；从 Bluesky 镜像来的
+   * 则是原记录的 `at://` 地址（rkey 是 TID）。
+   *
+   * 它同时是回环吸收点：写路径发出去的记录会被 JetStream 送回读路径，靠这一列上的
+   * 唯一索引 + `on conflict do nothing` 吃掉。
+   */
+  atprotoUri: text('atproto_uri'),
+  /**
+   * `putRecord` 的返回值 / JetStream 事件的 cid。回复的 strongRef 必须 uri + cid
+   * 成对，缺 cid 就不能当父锚点 —— 所以「两列都非空」等价于「这条帖已成功发布」。
+   */
+  atprotoCid: text('atproto_cid'),
+}, table => [
+  /**
+   * 刻意用**普通唯一索引**而不是 `WHERE atproto_uri IS NOT NULL` 的部分索引：SQLite
+   * 的唯一索引本来就把多个 NULL 当彼此不同，约束语义完全等价；部分索引只省体积，而
+   * 这点体积毫无意义。而 drizzle-kit 的 `where` 要经过 `sql\`\`` 字符串化往返，在这个
+   * 刚被快照漂移坑过的仓库里属于纯风险、零收益。
+   */
+  uniqueIndex('posts_atproto_uri_unique').on(table.atprotoUri),
+])
 
 export const postLikes = sqliteTable('post_likes', {
   postId: integer('post_id').notNull().references(() => posts.id),
@@ -164,6 +186,8 @@ export const atprotoIdentities = sqliteTable('atproto_identities', {
    */
   handle: text('handle').notNull(),
   pdsUrl: text('pds_url').notNull(),
+  /** 是否把本站新帖同步发到用户 PDS。默认开，用户可在设置页关掉。 */
+  publishEnabled: integer('publish_enabled', { mode: 'boolean' }).notNull().default(true),
   createdAt: integer('created_at', { mode: 'timestamp' }).notNull().$defaultFn(() => new Date()),
 })
 
@@ -187,10 +211,38 @@ export const atprotoCursor = sqliteTable('atproto_cursor', {
   value: text('value').notNull(),
 })
 
-/** JetStream 至少一次投递的幂等去重，按 `at://` URI。需按 `seenAt` 定期清理。 */
-export const atprotoSeen = sqliteTable('atproto_seen', {
-  uri: text('uri').notNull().primaryKey(),
-  seenAt: integer('seen_at', { mode: 'timestamp' }).notNull().$defaultFn(() => new Date()),
+/**
+ * 出站队列：本站的帖/删要写进用户自己的 PDS，成功即删行。
+ *
+ * **这里刻意没有 `atproto_seen` 那样的去重表。** 曾经有过一张（按 `at://` URI 做主键
+ * 记「见过」），已删除 —— 它的主键是 URI，于是同一个 URI 的 delete 事件会撞主键被静默
+ * 跳过，**镜像删除直接失效**。而有了 `posts.atproto_uri` 之后它什么也买不到：建是
+ * `on conflict do nothing`、删是 `update ... where atproto_uri = ?`、改是 upsert，
+ * 三种操作天然幂等，重复投递的事件重放时同样被吸收。**不要再建回来。**
+ */
+export const atprotoOutbox = sqliteTable('atproto_outbox', {
+  id: integer('id').primaryKey({ autoIncrement: true }),
+  /** 目标 repo。存 did 而不是 username —— 解绑重绑会让绑定变化。 */
+  did: text('did').notNull(),
+  /** 只为查/清方便，解绑时按它整批删。 */
+  username: text('username').notNull().references(() => users.username),
+  kind: text('kind').notNull(),
+  rkey: text('rkey').notNull(),
+  uri: text('uri').notNull(),
+  /** `kind = 'delete'` 时为 null。 */
+  record: text('record'),
+  attempts: integer('attempts').notNull().default(0),
+  /** `'pending' | 'dead'`；成功即删行，所以没有 `'done'`。 */
+  status: text('status').notNull().default('pending'),
+  lastError: text('last_error'),
+  /** 退避用：失败后推到未来，让位给后面的行，避免队头阻塞。 */
+  nextAttemptAt: integer('next_attempt_at', { mode: 'timestamp' }).notNull().$defaultFn(() => new Date()),
+  createdAt: integer('created_at', { mode: 'timestamp' }).notNull().$defaultFn(() => new Date()),
 }, table => [
-  index('atproto_seen_seen_at_idx').on(table.seenAt),
+  /**
+   * `(uri, kind)` 而不是仅 `uri`：同一个 URI 先 put 后 delete 是**合法序列**，两行都
+   * 必须在队列里，只按 uri 做唯一就会把 delete 顶掉。
+   */
+  uniqueIndex('atproto_outbox_uri_kind_unique').on(table.uri, table.kind),
+  index('atproto_outbox_claim_idx').on(table.status, table.nextAttemptAt),
 ])
