@@ -1,6 +1,7 @@
 import type { MirrorOutcome, Tx } from './mirror'
 import { eq } from 'drizzle-orm'
 import { atprotoCursor, db } from 'server/database'
+import { backfillFromPds } from './backfill'
 import { mirrorDelete, mirrorRecord, POST_COLLECTION, publishMirrored } from './mirror'
 import * as AtprotoService from './service'
 
@@ -23,8 +24,13 @@ import * as AtprotoService from './service'
 const JETSTREAM_ORIGIN = 'wss://jetstream.us-east.bsky.network'
 const SUBSCRIBE_PATH = '/xrpc/network.bsky.jetstream.subscribeEvents'
 const WANTED_COLLECTIONS = [POST_COLLECTION]
-/** `identity` 是免费的：`collections` 只约束 commit 事件，它会照常流过。 */
-const WANTED_KINDS = ['commit', 'identity', 'account']
+/**
+ * `identity` 是免费的：`collections` 只约束 commit 事件，它会照常流过。
+ *
+ * `sync` 必须显式订，且 **v1 从来没有这个 kind** —— 它是 v2 独有的，漏订的后果是
+ * **静默缺帖**（见 `queueResync` 的说明）。lexicon 给 `kinds` 的上限正好是 4，这里是满的。
+ */
+const WANTED_KINDS = ['commit', 'identity', 'account', 'sync']
 const CURSOR_KEY = 'jetstream'
 
 /**
@@ -70,6 +76,15 @@ interface IdentityPayload {
   did: string
   time: string
   identity?: { did?: string, handle?: string }
+}
+
+/** v2 独有：仓库的 commit 链断裂，上游让消费者重新同步这个仓库。 */
+interface SyncPayload {
+  $type?: string
+  seq: number
+  did: string
+  time: string
+  sync?: { seq?: number, rev?: string }
 }
 
 // ─── URL 拼装（参数名唯一的出口）───────────────────────────────────────────────
@@ -230,15 +245,24 @@ let backoffAttempt = 0
 let didSignature = ''
 let lastEventAt: number | undefined
 let connected = false
+let resyncTimer: ReturnType<typeof setTimeout> | null = null
+/**
+ * `sync` 的频率我们没有任何实测数据（lexicon 只说它是归档期的），所以先把它记成
+ * 一个可观测的数字：状态端点上能看到「到底发生过几次」。
+ */
+let syncEventCount = 0
+let lastSyncAt: number | undefined
 
 // ─── 帧处理 ───────────────────────────────────────────────────────────────────
 
-function frameKind(payload: Record<string, unknown>): 'commit' | 'identity' | 'account' | undefined {
+type FrameKind = 'commit' | 'identity' | 'account' | 'sync'
+
+function frameKind(payload: Record<string, unknown>): FrameKind | undefined {
   const type = payload.$type
   if (typeof type === 'string') {
     const hash = type.lastIndexOf('#')
     const kind = hash >= 0 ? type.slice(hash + 1) : type
-    if (kind === 'commit' || kind === 'identity' || kind === 'account')
+    if (kind === 'commit' || kind === 'identity' || kind === 'account' || kind === 'sync')
       return kind
   }
   // 兜底：形状判断（`$type` 缺失时）。
@@ -248,7 +272,83 @@ function frameKind(payload: Record<string, unknown>): 'commit' | 'identity' | 'a
     return 'identity'
   if (payload.account)
     return 'account'
+  if (payload.sync)
+    return 'sync'
   return undefined
+}
+
+// ─── `sync` 事件的重同步 ──────────────────────────────────────────────────────
+
+/**
+ * 上游说「这个仓库的 commit 链断了，你自己重新同步一遍」。**只有 v2 会发这个事件**，
+ * v1 的线上协议里根本不存在 —— 这就是当初漏掉它的原因。
+ *
+ * 漏掉的后果不是报错，是**静默缺帖**：链断期间那些 commit 事件压根不会流过来，用户
+ * 在 Bluesky 发的帖永远不出现在本站，而日志里一个错都没有。所以这条路径存在的主要
+ * 价值是「把静默变成不静默」。
+ *
+ * lexicon 的措辞是 **archived** —— 它来自归档重放（停机后追赶），不在实时流末尾。
+ * 也就是说**平时不会看到它**，只在补历史的时候才可能出现。触发频率我们没有任何实测
+ * 数据，所以下面的冷却与批量上限是按「可能很频繁」设的：宁可少同步一次，也不能让一个
+ * 反复断裂的仓库把服务端变成回填机器（每轮回填是一次 `listRecords`，走的是用户的 PDS）。
+ *
+ * 重同步复用 `backfillFromPds` —— 与绑定回填**同一个函数、同一套镜像规则**，所以
+ * 这里不需要第二套实现来保持同步。它按 `atproto_uri` 去重，已经镜像过的帖不会重复。
+ */
+const resyncQueue = new Set<string>()
+/** 合并窗口：一次追赶可能连着来好几个 sync，没必要一个一个回填。 */
+const RESYNC_DEBOUNCE_MS = 30 * 1000
+/** 同一个仓库的两次重同步之间至少隔这么久。 */
+const RESYNC_COOLDOWN_MS = 60 * 60 * 1000
+/** 一轮 drain 最多处理几个仓库，其余的留给下一轮。 */
+const RESYNC_BATCH = 3
+const lastResyncAt = new Map<string, number>()
+
+/**
+ * **读循环里唯一允许做的事**：入队。所有 `await` 都在 `drainResync` 里。
+ *
+ * 未绑定 / 非本站用户的 DID 直接丢掉 —— `sync` 是按 `dids` 过滤后送来的，正常情况下
+ * 不会有别人的，但解绑与事件之间本来就存在竞态窗口。
+ */
+function queueResync(did: string): void {
+  if (!AtprotoService.getIdentityByDid(did))
+    return
+  const last = lastResyncAt.get(did)
+  if (last !== undefined && Date.now() - last < RESYNC_COOLDOWN_MS) {
+    console.warn(`[jetstream] ${did} 在冷却期内（${RESYNC_COOLDOWN_MS / 60000} 分钟内已重同步过），忽略这次 sync`)
+    return
+  }
+  resyncQueue.add(did)
+  armResync()
+}
+
+function armResync(): void {
+  if (resyncTimer || !resyncQueue.size || !started)
+    return
+  resyncTimer = setTimeout(() => {
+    resyncTimer = null
+    void drainResync()
+  }, RESYNC_DEBOUNCE_MS)
+  resyncTimer.unref?.()
+}
+
+/**
+ * 导出是为了让探针能直接驱动它 —— 否则唯一的触发途径是「网络上来一个 sync 帧、
+ * 再等 30 秒防抖」，本地复现不出来。
+ *
+ * 逐条 `await`：回填是网络 I/O，同时打几个用户的 PDS 没有好处，而队列本来就有上限。
+ */
+export async function drainResync(): Promise<void> {
+  const batch = [...resyncQueue].slice(0, RESYNC_BATCH)
+  for (const did of batch) {
+    resyncQueue.delete(did)
+    lastResyncAt.set(did, Date.now())
+    // 身份可能刚好在这一刻被解绑：`restore` 会失败，而 `backfillFromPds` 自己吞掉
+    // 所有异常只记日志，所以这里不需要额外保护。
+    await backfillFromPds(did)
+  }
+  if (resyncQueue.size)
+    armResync()
 }
 
 let failureSeq: number | undefined
@@ -283,17 +383,29 @@ export function handleFrame(raw: string): void {
 
   lastEventAt = Date.now()
   const outcomes: MirrorOutcome[] = []
+  /** 事务提交之后才入队，与 `outcomes` 同一个道理：回滚了就不该留下副作用。 */
+  const syncs: string[] = []
 
   try {
     db.transaction((tx) => {
-      if (kind === 'commit')
+      if (kind === 'commit') {
         outcomes.push(...mirrorCommit(tx, payload as unknown as CommitPayload))
-      else if (kind === 'identity')
+      }
+      else if (kind === 'identity') {
         applyIdentity(payload as unknown as IdentityPayload)
-      else
+      }
+      else if (kind === 'sync') {
+        // **只收集，不在这里做任何网络请求**（这个函数里不允许有 await）。
+        // 没带 did 的帧也照样收进来：计数器要的是「这个事件多久发生一次」，
+        // 而不是「其中几次是可用的」—— 频率观测不能被过滤吃掉。
+        const sync = payload as unknown as SyncPayload
+        syncs.push(typeof sync.did === 'string' ? sync.did : '')
+      }
+      else {
         // v1 **只记日志**：`#account` 未必等于「账号删了」（可能是远端审核动作），
         // 因一次远端动作删用户本地内容不可逆。
         console.warn(`[jetstream] account 事件（未处理）did=${payload.did} status=${JSON.stringify((payload.account as { status?: string } | undefined)?.status)}`)
+      }
 
       advanceCursor(tx, seq)
     })
@@ -333,6 +445,22 @@ export function handleFrame(raw: string): void {
 
   for (const outcome of outcomes)
     publishMirrored(outcome)
+
+  // 事务已提交。`sync` 是「我们可能已经漏了帖」的唯一信号，所以即使没绑定的 DID
+  // 被 queueResync 丢掉，也要留下一条日志 —— 这个事件本身的出现就值得知道。
+  if (syncs.length) {
+    syncEventCount += syncs.length
+    lastSyncAt = Date.now()
+    for (const did of syncs) {
+      if (!did) {
+        // 按 lexicon 这不合法（`did` 是 required），真出现就是协议变了。
+        console.warn('[jetstream] sync 事件没有带 did，无法判断该重新同步哪个仓库')
+        continue
+      }
+      console.warn(`[jetstream] sync 事件：${did} 的 commit 链断裂，已排队重新同步（若已绑定）`)
+      queueResync(did)
+    }
+  }
 }
 
 // ─── 连接生命周期 ─────────────────────────────────────────────────────────────
@@ -495,6 +623,9 @@ export function startJetstream(): void {
   didSignature = currentDidSignature()
   didPollTimer = setInterval(pollDids, DID_POLL_MS)
   didPollTimer.unref?.()
+  // `stopJetstream` 会清掉重同步的定时器但**保留队列**，所以这里要把它重新武装起来，
+  // 否则停机期间排上的重同步要等到下一个 sync 事件才有人管。
+  armResync()
   void connect()
 }
 
@@ -515,6 +646,10 @@ export function stopJetstream(): void {
   if (debounceTimer)
     clearTimeout(debounceTimer)
   debounceTimer = null
+  // 队列**不清空**：重同步是本地状态修复，与连接无关，重连后接着做才对。
+  if (resyncTimer)
+    clearTimeout(resyncTimer)
+  resyncTimer = null
   socket?.close()
   socket = null
   connected = false
@@ -527,5 +662,13 @@ export function getJetstreamStatus() {
     cursor: currentCursor ?? null,
     lastEventAt: lastEventAt ?? null,
     boundDidCount: AtprotoService.getBoundDids().length,
+    /**
+     * `sync` 的频率。**这两个数字是用来决定要不要保留整个重同步机制的**：
+     * 一直是 0 就说明它只在极罕见的情况下出现，代价可以忽略；若是常态，
+     * 那说明「链断裂」这件事本身需要单独看。
+     */
+    syncEventCount,
+    lastSyncAt: lastSyncAt ?? null,
+    resyncQueued: resyncQueue.size,
   }
 }
