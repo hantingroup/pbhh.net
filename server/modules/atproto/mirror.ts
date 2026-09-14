@@ -165,9 +165,18 @@ export function mirrorRecord(tx: Tx, input: RecordInput): MirrorOutcome | undefi
     // strongRef 的锚点时（回复的 `reply.parent` / 点赞的 `subject`）两边都要给 cid。
     // 不刷新就会拿着过期的 cid 去写，而 Bluesky 的 AppView 是用 subject 的 cid 对齐
     // 索引的 —— 结果是记录进了 repo、计数却不涨、赞列表里也看不到。
+    //
+    // **但「刷新」不等于「覆盖」**：`cid` 在 `RecordInput` 里是可选的，事件没带
+    // cid 时只能**保留旧值**。写成 `input.cid ?? null` 会把一个已知的 cid 清空，
+    // 于是这条帖从「可被引用」变成「不可引用」—— 而且没有第二次机会：后续事件
+    // 不会把清掉的 cid 补回来，锚在它上面的回复会永久停在 `parentUnpublished`
+    // （`outbox.ts` 的 `attachReply`），点赞的 `subject` 也会带着 null 发出去。
     if (hit) {
       tx.update(posts)
-        .set({ content: text, atprotoCid: input.cid ?? null })
+        .set({
+          content: text,
+          ...(input.cid ? { atprotoCid: input.cid } : {}),
+        })
         .where(eq(posts.id, hit.id))
         .run()
       return undefined
