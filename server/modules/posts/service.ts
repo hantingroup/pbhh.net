@@ -1,5 +1,5 @@
 import type { SQL } from 'drizzle-orm'
-import { and, asc, count, desc, eq, inArray, isNull, sql } from 'drizzle-orm'
+import { and, asc, count, desc, eq, inArray, isNotNull, isNull, sql } from 'drizzle-orm'
 import { db, postLikes, posts, users } from 'server/database'
 import { removeForDeletedPosts } from '../notification/service'
 
@@ -252,16 +252,24 @@ export function create(username: string, content: string, title?: string, parent
   return result!.id
 }
 
-export function remove(id: number, username: string): 'ok' | 'not_found' | 'forbidden' {
+/** 一条需要连带从 Bluesky 删掉的本地帖。 */
+export interface RemovablePost { id: number, atprotoUri: string }
+
+export type RemoveResult =
+  | { status: 'not_found' }
+  | { status: 'forbidden' }
+  | { status: 'ok', outbound: RemovablePost[] }
+
+export function remove(id: number, username: string): RemoveResult {
   const post = db
     .select({ username: posts.username })
     .from(posts)
     .where(and(eq(posts.id, id), eq(posts.deleted, false)))
     .get()
   if (!post)
-    return 'not_found'
+    return { status: 'not_found' }
   if (post.username !== username)
-    return 'forbidden'
+    return { status: 'forbidden' }
   const descendantIds = db.all<{ id: number }>(sql`
     WITH RECURSIVE tree(id) AS (
       SELECT id FROM ${posts} WHERE id = ${id}
@@ -271,9 +279,29 @@ export function remove(id: number, username: string): 'ok' | 'not_found' | 'forb
     SELECT id FROM tree
   `).map(r => r.id)
 
+  /**
+   * 挑出该连带从 Bluesky 删掉的行，**只挑发起删帖的人自己的**。
+   *
+   * 这里决不能用「所有后代」：上面的递归 CTE 会软删**别人**的回复，而那些回复是别人
+   * 写在自己 repo 里的记录 —— 删不得。而 `atproto_uri IS NOT NULL` 的含义是「这条帖
+   * 在 Bluesky 上有个对应记录」，`cid` 空也照样挑：那条 put 可能还在队列里（FIFO 保证
+   * 它会先发出去再被删），也可能已经死了（删除会撞 `RecordNotFound`，按幂等算成功）。
+   * 重复入队由 `atproto_outbox` 的 `(uri, kind)` 唯一索引吸收。
+   */
+  const outbound = db
+    .select({ id: posts.id, atprotoUri: posts.atprotoUri })
+    .from(posts)
+    .where(and(
+      inArray(posts.id, descendantIds),
+      eq(posts.username, username),
+      isNotNull(posts.atprotoUri),
+    ))
+    .all()
+    .map(row => ({ id: row.id, atprotoUri: row.atprotoUri! }))
+
   db.update(posts).set({ deleted: true }).where(inArray(posts.id, descendantIds)).run()
   removeForDeletedPosts(descendantIds)
-  return 'ok'
+  return { status: 'ok', outbound }
 }
 
 export function toggleLike(postId: number, username: string): boolean | null {

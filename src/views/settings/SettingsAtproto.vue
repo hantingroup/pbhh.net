@@ -19,6 +19,7 @@ import {
 import { Button } from '@/components/ui/button'
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
 import { Spinner } from '@/components/ui/spinner'
+import { Switch } from '@/components/ui/switch'
 import { api, API_BASE, TOKEN } from '@/lib/api'
 
 const { t } = useI18n()
@@ -29,6 +30,7 @@ interface AtprotoBinding {
   configured: boolean
   did: string | null
   handle: string | null
+  publishEnabled: boolean
   domainHandle: string
   handleDomain: string
 }
@@ -41,6 +43,7 @@ const handleError = ref('')
 /** 正在跳去 PDS 授权（顶层跳转，页面会离开，所以这个状态基本只是防重复点击）。 */
 const redirecting = ref(false)
 const unbinding = ref(false)
+const savingPublish = ref(false)
 const actionError = ref('')
 const notice = ref('')
 
@@ -157,6 +160,31 @@ async function unbind() {
     unbinding.value = false
   }
 }
+
+/**
+ * 乐观切换 + 失败回滚。这个开关的后果完全在服务端（决定建帖时要不要入队），所以
+ * 不能只改本地状态装装样子 —— 保存失败必须弹回去，否则用户会以为已经关掉了。
+ */
+async function setPublish(enabled: boolean) {
+  if (!binding.value)
+    return
+  const previous = binding.value.publishEnabled
+  binding.value.publishEnabled = enabled
+  savingPublish.value = true
+  actionError.value = ''
+  try {
+    const { error } = await api.me.bindings.atproto.patch({ publishEnabled: enabled })
+    if (error)
+      throw new Error(String(error))
+  }
+  catch {
+    binding.value.publishEnabled = previous
+    actionError.value = t('bind.atproto.publishFailed')
+  }
+  finally {
+    savingPublish.value = false
+  }
+}
 </script>
 
 <template>
@@ -217,6 +245,23 @@ async function unbind() {
             {{ t('bind.atproto.syncNote') }}
           </p>
 
+          <!-- 发布开关。默认开；关掉只影响「以后新发的帖」，不入队而已。 -->
+          <div class="flex items-center justify-between gap-4 border-t pt-4">
+            <div>
+              <p class="text-sm font-medium">
+                {{ t('bind.atproto.publishLabel') }}
+              </p>
+              <p class="text-xs text-muted-foreground">
+                {{ t('bind.atproto.publishHint') }}
+              </p>
+            </div>
+            <Switch
+              :model-value="binding.publishEnabled"
+              :disabled="savingPublish"
+              @update:model-value="setPublish"
+            />
+          </div>
+
           <AlertDialog>
             <AlertDialogTrigger as-child>
               <Button variant="outline" class="w-full text-destructive hover:text-destructive" :disabled="unbinding">
@@ -230,6 +275,13 @@ async function unbind() {
                 <AlertDialogDescription>
                   {{ t('bind.atproto.unbindConfirmDescription', { handle: binding.domainHandle }) }}
                 </AlertDialogDescription>
+                <!--
+                  「解绑不等于删帖」必须写在这里。解绑会清空出站队列，用户很容易
+                  反过来理解成「解绑会把我在 Bluesky 上的东西一起收走」。
+                -->
+                <p class="text-sm text-muted-foreground">
+                  {{ t('bind.atproto.unbindKeepsPosts') }}
+                </p>
               </AlertDialogHeader>
               <AlertDialogFooter>
                 <AlertDialogCancel>{{ t('common.cancel') }}</AlertDialogCancel>

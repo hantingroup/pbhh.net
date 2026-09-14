@@ -1,5 +1,5 @@
 import { eq, sql } from 'drizzle-orm'
-import { atprotoIdentities, db } from 'server/database'
+import { atprotoIdentities, atprotoOutbox, db } from 'server/database'
 import { labelFromHost } from './config'
 
 export interface AtprotoIdentity {
@@ -7,6 +7,7 @@ export interface AtprotoIdentity {
   did: string
   handle: string
   pdsUrl: string
+  publishEnabled: boolean
 }
 
 export function getIdentity(username: string): AtprotoIdentity | undefined {
@@ -81,8 +82,32 @@ export function unbindIdentity(username: string): string | undefined {
   const identity = getIdentity(username)
   if (!identity)
     return undefined
-  db.delete(atprotoIdentities).where(eq(atprotoIdentities.username, username)).run()
+  db.transaction((tx) => {
+    // 未投递的出站行必须一起清掉，且**与身份删除在同一个事务里**：已解绑的仓库
+    // 不可投递（`revokeSession` 会把会话一起撤销），而那些行按 `username` 只在这里
+    // 有唯一一次清理机会 —— 一旦身份行没了就再也找不到它们，worker 只会一遍遍
+    // `restore` 失败直到标记 dead。
+    tx.delete(atprotoOutbox).where(eq(atprotoOutbox.username, username)).run()
+    tx.delete(atprotoIdentities).where(eq(atprotoIdentities.username, username)).run()
+  })
+  // **不清 `posts.atproto_uri` / `atproto_cid`**：URI 是历史事实，留着让重绑后旧帖的
+  // 去重依然有效，也仍然能正确镜像「用户在 Bluesky 删掉了旧帖」。
   return identity.did
+}
+
+/**
+ * 设置页的「把这里的帖子同步发到 Bluesky」开关。返回 false = 这个用户没绑定。
+ *
+ * 用 `returning()` 而不是 `run()` 的 `changes`：bun:sqlite 驱动下后者的类型是
+ * `void`，拿不到影响行数。
+ */
+export function setPublishEnabled(username: string, publishEnabled: boolean): boolean {
+  const row = db.update(atprotoIdentities)
+    .set({ publishEnabled })
+    .where(eq(atprotoIdentities.username, username))
+    .returning({ username: atprotoIdentities.username })
+    .get()
+  return !!row
 }
 
 /** 更新最后观测到的 handle（用户可能在别处改过）。 */

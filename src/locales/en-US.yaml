@@ -242,6 +242,13 @@ bind:
     replyNote: >-
       Replies other people leave on your posts are not synced, and likes on
       synced posts stay on this site only.
+    publishLabel: Publish my posts here to Bluesky
+    publishHint: >-
+      When off, only new posts stop going to Bluesky. Posts already published
+      are not affected.
+    publishFailed: The setting could not be saved. Please try again later.
+    unbindKeepsPosts: >-
+      Unlinking does not delete posts you have already published to Bluesky.
     handleLabel: atproto handle
     handlePlaceholder: alice.bsky.social
     handleRequired: Please enter your atproto handle

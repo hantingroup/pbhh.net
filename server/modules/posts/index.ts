@@ -1,4 +1,5 @@
 import { Elysia, t } from 'elysia'
+import * as AtprotoOutbox from '../atproto/outbox'
 import { optionalAuth, requireAuth } from '../auth/guard'
 import * as AuthService from '../auth/service'
 import { bus } from '../events/bus'
@@ -31,6 +32,9 @@ export default new Elysia()
   .post('/posts', ({ body, status, username }) => {
     const postId = PostService.create(username, body.content, body.title)
     bus.publish('net.pbhh.post.created', { username, postId })
+    // 写路径**显式调用**，不订阅总线 —— 见 outbox.ts 开头的说明。同步函数，
+    // 内部自己判断有没有绑定、有没有关掉发布。
+    AtprotoOutbox.mirrorLocalPost({ username, postId })
     return status(201, {})
   }, {
     body: createPostBody,
@@ -40,10 +44,13 @@ export default new Elysia()
   })
   .delete('/posts/:id', ({ params, status, username }) => {
     const result = PostService.remove(Number(params.id), username)
-    if (result === 'not_found')
+    if (result.status === 'not_found')
       return status(404, { message: 'error.postNotFound' })
-    if (result === 'forbidden')
+    if (result.status === 'forbidden')
       return status(403, { message: 'error.forbidden' })
+    // 入队要在响应之前 —— 它只是一次本地写。先返回再入队就留下一个「进程恰好被杀
+    // 则 Bluesky 上的副本永远不会被删」的窗口。
+    AtprotoOutbox.enqueueDeletes(username, result.outbound)
     return {}
   })
   .post('/posts/:id/like', ({ params, status, username }) => {
@@ -67,6 +74,7 @@ export default new Elysia()
       actorUsername: username,
       replyId,
     })
+    AtprotoOutbox.mirrorLocalPost({ username, postId: replyId })
     return status(201, {})
   }, {
     body: replyBody,

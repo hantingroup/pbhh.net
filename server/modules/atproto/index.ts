@@ -7,6 +7,7 @@ import { backfillFromPds } from './backfill'
 import { getOAuthClient, isAtprotoConfigured, revokeSession, sweepExpiredStates } from './client'
 import { HANDLE_DOMAIN, SITE_ORIGIN } from './config'
 import { getJetstreamStatus, scheduleJetstreamReconnect, startJetstream } from './jetstream'
+import { getOutboxStatus, startOutbox } from './outbox'
 import * as AtprotoService from './service'
 
 const SWEEP_INTERVAL_MS = 15 * 60 * 1000
@@ -19,6 +20,9 @@ setInterval(sweepExpiredStates, SWEEP_INTERVAL_MS).unref?.()
 // 读路径（JetStream 入站）。放在模块加载处：没有已绑定身份时它自己就返回，
 // 所以本地开发不会真去连生产 JetStream。
 startJetstream()
+
+// 写路径（outbox 出站）。空队列时每个 tick 只是一次带索引的查询，本地开发没有代价。
+startOutbox()
 
 async function resolveHandle(session: OAuthSession): Promise<string | undefined> {
   try {
@@ -175,10 +179,19 @@ export default new Elysia()
       configured: isAtprotoConfigured(),
       did: identity?.did ?? null,
       handle: identity?.handle ?? null,
+      // 没绑定时也给 true（schema 默认值），前端只在绑定分支里读它。
+      publishEnabled: identity?.publishEnabled ?? true,
       // 子域标签就是用户名（降为小写），注册时就定了，没有单独的认领步骤。
       domainHandle: `${username.toLowerCase()}.${HANDLE_DOMAIN}`,
       handleDomain: HANDLE_DOMAIN,
     }
+  })
+  .patch('/me/bindings/atproto', ({ body, username, status }) => {
+    if (!AtprotoService.setPublishEnabled(username, body.publishEnabled))
+      return status(404, { message: 'atproto.notBound' })
+    return { publishEnabled: body.publishEnabled }
+  }, {
+    body: t.Object({ publishEnabled: t.Boolean() }),
   })
   .delete('/me/bindings/atproto', async ({ username, status }) => {
     const did = AtprotoService.unbindIdentity(username)
@@ -195,3 +208,10 @@ export default new Elysia()
    * 用户；个数足以判断「该不该连着」。
    */
   .get('/me/bindings/atproto/jetstream', () => getJetstreamStatus())
+  /**
+   * 写路径的可观测性。**只回计数，不回 URL/DID** —— 看的是「队列堵了没有」。
+   *
+   * `dead` 是唯一一个需要人去看一眼的数字：行还在库里，`select * from atproto_outbox
+   * where status = 'dead'` 能拿到 uri、attempts 和 last_error。
+   */
+  .get('/me/bindings/atproto/outbox', () => getOutboxStatus())
