@@ -467,7 +467,7 @@ export type BackfillPostsResult =
  * 1. **父帖不在 Bluesky 上的回复永远补不上，不是暂时。** Bluesky 的回复必须带父帖的
  *    `{uri, cid}` strongRef，而父帖若只存在于本站，那个 cid 谁也构造不出来。别人写的、
  *    从未发布过的帖下的回复全归此类。
- * 2. **已卡死的帖**（见 `unpublishedIds`）：uri 已定却从未投递成功，会被 uri 闸永久跳过。
+ * 2. **已卡死的帖**（判据与两条修法见本节末尾）：uri 已定却从未投递成功，会被 uri 闸永久跳过。
  * 3. **可能造出重复**：用户绑定前若已在 Bluesky 手动发过同样内容，这里会再发一条，而
  *    两条之间没有任何共同标识可供比对（入站回填早就把 Bluesky 那条也镜像进来了，内容
  *    一样、来源不同）。让用户自己删一条即可 —— 删除是幂等的、且我们控制得住。
@@ -480,6 +480,26 @@ export type BackfillPostsResult =
  * 写完的状态（候选都被写上 uri 了 ⇒ 全部落进 `alreadyPublished`），不会算出重复的 TID。
  * 一旦在循环里加 `await`（比如「先探一下 PDS 通不通」），这个论证当场失效，那时就必须补
  * 一个重入闸，否则两次跑会在 `posts_atproto_uri_unique` 上撞车。
+ *
+ * ── 上面第 2 条「已卡死的帖」：留给下一次改动 ──────────────────────────────
+ *
+ * **判据**：`atproto_uri IS NOT NULL AND atproto_cid IS NULL AND deleted = 0`。
+ * `atproto_cid` 只在投递成功时写（见 `succeed`），所以「有 uri 没 cid」就是「uri 已定、
+ * 但**没有收到过投递成功的确认**」：outbox 行要么退避到 `dead`，要么被 `unbindIdentity`
+ * 连带清掉了。**2026-09-14 生产上是 0 行**（那 28 条候选从未被尝试过），所以这一轮
+ * 不处理 —— 为 0 行写修复代码，等于让一段没有真实输入的分支先于需求存在。
+ *
+ * 这个判据是**必要条件而非充要条件**：`succeed` 在 `cid` 为空时不会回写（dry 模式走
+ * 的就是这一支），所以跑过一次干跑的库会凭空多出「有 uri 没 cid」的行。用之前先确认
+ * 那些 uri 对应的 outbox 行到底是怎么没的。
+ *
+ * 修法是**一次入队两条**：换一个新 TID 重发，**并且**给旧 uri 补一条 delete。
+ *
+ * 之所以不必先弄清旧记录到底落没落：`deliverPost` 的 delete 分支**把 `RecordNotFound`
+ * 当成功**（幂等，见那里的注释）。旧 uri 上什么都没有是最可能的情况，那条 delete 自己
+ * 就会成功删掉自己，不会留下 `dead` 行 —— 代价只是白跑一次 XRPC。反过来若旧记录真的
+ * 在，这条 delete 正好收走它，也就不会在 Bluesky 上留下重复。**两条路都通，所以不需要
+ * 拿旧 uri 去 `getRecord` 探一次**，这个函数也就不必因此变成 async。
  */
 export function backfillLocalPosts(username: string): BackfillPostsResult {
   const identity = AtprotoService.getIdentity(username)
