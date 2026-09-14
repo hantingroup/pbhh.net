@@ -54,15 +54,26 @@ export default new Elysia()
     return {}
   })
   .post('/posts/:id/like', ({ params, status, username }) => {
-    const result = PostService.toggleLike(Number(params.id), username)
+    const postId = Number(params.id)
+    const result = PostService.toggleLike(postId, username)
     if (result === null)
       return status(404, { message: 'error.postNotFound' })
-    bus.publish('net.pbhh.post.liked', {
-      postId: Number(params.id),
-      actorUsername: username,
-      liked: result,
+    // 写路径显式调用，同 `mirrorLocalPost`。注意 `retractUri` 只在取消赞时有意义 ——
+    // 点赞时 `toggleLike` 刚插进去的那一行还没有 atproto_uri（`mirrorLocalLike` 自己
+    // 负责写它，不变量 L）。
+    AtprotoOutbox.mirrorLocalLike({
+      username,
+      postId,
+      liked: result.liked,
+      retractUri: result.liked ? null : result.retractedUri,
     })
-    return { liked: result }
+    bus.publish('net.pbhh.post.liked', {
+      postId,
+      actorUsername: username,
+      liked: result.liked,
+    })
+    // HTTP 契约不变：仍是一个 boolean。
+    return { liked: result.liked }
   })
   .post('/posts/:id/reply', ({ params, body, status, username }) => {
     const parentExists = PostService.get(Number(params.id))

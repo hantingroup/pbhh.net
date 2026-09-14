@@ -14,8 +14,19 @@ import * as AtprotoService from './service'
  * 放在同一个函数里，「完全相同的规则」就是结构事实，而不是两处实现靠人工保持同步。
  */
 
-/** 只镜像这一种 collection。like / follow / repost 不进本站。 */
+/**
+ * 镜像的两种 collection。**follow / repost 仍然不进本站。**
+ *
+ * 两个常量并排放在这里，是因为读写两侧都要引它们：读侧（`jetstream.ts` / 本模块）
+ * 判断事件该走哪条规则，写侧（`outbox.ts`）决定 `putRecord` / `deleteRecord` 发到哪。
+ * 一份定义，两个方向共用。
+ *
+ * `LIKE_COLLECTION` 的处理**不在本模块**（like 不落 `posts`，走 `jetstream.ts` 的
+ * `mirrorLike`）—— 这里的 `mirrorRecord` 是帖专用的：它硬编码 `POST_COLLECTION`，
+ * 且强制 `record.text` 非空，套不到 like 上。常量放在这里只是为了让两边引到同一个串。
+ */
 export const POST_COLLECTION = 'app.bsky.feed.post'
+export const LIKE_COLLECTION = 'app.bsky.feed.like'
 
 /** `record.createdAt` 的可信窗口，之外一律回退观测时刻。 */
 const MAX_FUTURE_MS = 5 * 60 * 1000
@@ -149,8 +160,16 @@ export function mirrorRecord(tx: Tx, input: RecordInput): MirrorOutcome | undefi
       .where(eq(posts.atprotoUri, uri))
       .get()
     // 命中则只更新正文。**不动 title** —— 那个字段是本站的，不属于这条记录。
+    //
+    // `atprotoCid` 必须一起刷新：编辑过的记录是一个**新的 cid**，而帖子被当作
+    // strongRef 的锚点时（回复的 `reply.parent` / 点赞的 `subject`）两边都要给 cid。
+    // 不刷新就会拿着过期的 cid 去写，而 Bluesky 的 AppView 是用 subject 的 cid 对齐
+    // 索引的 —— 结果是记录进了 repo、计数却不涨、赞列表里也看不到。
     if (hit) {
-      tx.update(posts).set({ content: text }).where(eq(posts.id, hit.id)).run()
+      tx.update(posts)
+        .set({ content: text, atprotoCid: input.cid ?? null })
+        .where(eq(posts.id, hit.id))
+        .run()
       return undefined
     }
     // 未命中按 create 处理（下面继续）。

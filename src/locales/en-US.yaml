@@ -154,7 +154,7 @@ post:
   comments: Comments
   readMore: Read more
   mirrored: From Bluesky
-  mirroredHint: This post was synced from their Bluesky account. The like count here is this site's own — Bluesky likes are not included, and likes you leave here are not sent to Bluesky.
+  mirroredHint: This post was synced from their Bluesky account. The like count here is this site's own — Bluesky likes are not included. If you have atproto linked, likes you leave here also go to your own Bluesky.
   notFound: Post not found
   replyCount: '{n} replies'
   reply:
@@ -242,12 +242,13 @@ bind:
       Posts you publish on Bluesky after linking show up in the wall here, along
       with your 50 most recent existing posts.
     replyNote: >-
-      Replies other people leave on your posts are not synced, and likes on
-      synced posts stay on this site only.
-    publishLabel: Publish my posts here to Bluesky
+      Replies other people leave on your posts are not synced, and neither are
+      their likes.
+    publishLabel: Publish my posts and likes here to Bluesky
     publishHint: >-
-      When off, only new posts stop going to Bluesky. Posts already published
-      are not affected.
+      When off, new posts and new likes stop going to Bluesky. Things already
+      published are not affected. Unliking still retracts the matching record
+      on Bluesky.
     publishFailed: The setting could not be saved. Please try again later.
     unbindKeepsPosts: >-
       Unlinking does not delete posts you have already published to Bluesky.

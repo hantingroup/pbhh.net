@@ -319,26 +319,48 @@ export function remove(id: number, username: string): RemoveResult {
   return { status: 'ok', outbound }
 }
 
-export function toggleLike(postId: number, username: string): boolean | null {
-  if (!db
-    .select({ id: posts.id })
-    .from(posts)
-    .where(and(eq(posts.id, postId), eq(posts.deleted, false)))
-    .get()) {
-    return null
-  }
-  const existing = db
-    .select()
-    .from(postLikes)
-    .where(and(eq(postLikes.postId, postId), eq(postLikes.username, username)))
-    .get()
-  if (existing) {
-    db
-      .delete(postLikes)
+/**
+ * 判别的结果是**故意做成两个形状不同的分支**，不是 `{ liked: boolean, atprotoUri }`：
+ * 后者会让人以为「点赞时也可能带出一个 uri」（实际恒为 null），从而在调用方写出永远
+ * 走不到的分支。取消赞才需要交出一条记录的地址 —— 撤回它。
+ */
+export type ToggleLikeResult =
+  | { liked: true }
+  | { liked: false, retractedUri: string | null }
+
+/**
+ * 点赞 / 取消赞。`null` = 这条帖不存在或已删除（调用方回 404）。
+ *
+ * 整个过程放进**一个事务**：`select → delete/insert` 裸跑时并发双击会撞 `post_likes`
+ * 的主键抛错（既有问题）；而且 `posts/index.ts` 紧接着要在 `mirrorLocalLike` 里
+ * `update` 同一行，两次写之间那行会短暂处于「存在但 `atproto_uri` 为 NULL」的状态 ——
+ * 那正是入站认领规则要分辨的形状，不能凭空造出来。
+ *
+ * `retractedUri` 取自被删掉的那一行，所以「在 Bluesky 官方客户端点的赞、回本站取消」
+ * 也能正确撤回：那时它是一条 TID 地址，不是 `pbhh-like-`。
+ */
+export function toggleLike(postId: number, username: string): ToggleLikeResult | null {
+  return db.transaction((tx) => {
+    if (!tx
+      .select({ id: posts.id })
+      .from(posts)
+      .where(and(eq(posts.id, postId), eq(posts.deleted, false)))
+      .get()) {
+      return null
+    }
+    const existing = tx
+      .select({ atprotoUri: postLikes.atprotoUri })
+      .from(postLikes)
       .where(and(eq(postLikes.postId, postId), eq(postLikes.username, username)))
-      .run()
-    return false
-  }
-  db.insert(postLikes).values({ postId, username }).run()
-  return true
+      .get()
+    if (existing) {
+      tx
+        .delete(postLikes)
+        .where(and(eq(postLikes.postId, postId), eq(postLikes.username, username)))
+        .run()
+      return { liked: false, retractedUri: existing.atprotoUri }
+    }
+    tx.insert(postLikes).values({ postId, username }).run()
+    return { liked: true }
+  })
 }

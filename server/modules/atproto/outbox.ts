@@ -1,12 +1,12 @@
 import type { Tx } from './mirror'
 import { Agent, RichText, XRPCError } from '@atproto/api'
-import { and, asc, count, eq, lte } from 'drizzle-orm'
-import { atprotoOutbox, db, posts } from 'server/database'
+import { and, asc, count, eq, inArray, lte } from 'drizzle-orm'
+import { atprotoOutbox, db, postLikes, posts } from 'server/database'
 // rkey 的格式与「哪条帖是镜像来的」是同一个约定，两个方向共用一份定义。
 // 放在 `posts/rkey.ts` 而不是这里，因为 `posts/service.ts` 不能 import atproto。
 import { localRkey } from '../posts/rkey'
 import { getOAuthClient } from './client'
-import { atUri, POST_COLLECTION } from './mirror'
+import { atUri, LIKE_COLLECTION, POST_COLLECTION } from './mirror'
 import * as AtprotoService from './service'
 
 /**
@@ -23,7 +23,13 @@ import * as AtprotoService from './service'
  * 3. **超长不截断，宁可不发**。本站正文允许 1000 字，Bluesky 的 `text` 上限是 300
  *    字素。截断意味着用户的公开身份上出现半句话，比发不出去糟得多。
  * 4. **确定性 rkey**：`pbhh-<本地 id>`。URI 在建帖那一刻就可计算，`putRecord` 对同
- *    rkey 是覆盖语义因而重试天然幂等，回环也才能被第 2 条吸收。
+ *    rkey 是覆盖语义因而重试天然幂等，回环也才能被第 2 条吸收。赞同理，用
+ *    `pbhh-like-<本地 id>`。
+ * 5. **引用别人记录时，锚点在发送时刻算，不在入队时刻算**。回复的 `reply.parent` 与
+ *    点赞的 `subject` 都是 strongRef，而目标帖的 `atproto_cid` 要等它自己的 put 投递
+ *    成功才有（`succeed` 才写）—— 也就是**建帖后那 3 秒内谁都锚不住它**。入队时就
+ *    算并「拿不到就丢弃」会把这类赞变成永久静默丢失。见 `resolveReplyRefs` 与
+ *    `deliverLike`。
  *
  * 依赖方向：`posts/index.ts → atproto/outbox.ts → posts/service.ts`；`posts/service.ts`
  * **完全不 import atproto**，无环。这里也不 import `posts/service` —— 需要的字段
@@ -35,6 +41,28 @@ import * as AtprotoService from './service'
 
 /** `app.bsky.feed.post` 的 `text` 上限（lexicon：maxGraphemes 300）。 */
 const MAX_GRAPHEMES = 300
+
+/**
+ * 队列行的意图。**四个值，两条独立的轴压在一起**：写还是删（`put` / `delete`），
+ * 以及发的是哪种记录（帖 / 赞）。
+ *
+ * 为什么把 collection 编进 `kind`，而不是给 `atproto_outbox` 加一列、也不是从
+ * `row.uri` 里解析出来：
+ *
+ * - `kind` 是**无约束的 `text` 列**，加值不需要迁移，已有的行原样有效。
+ * - 解析 uri 要另写一个 `collectionOf()`，还得处理畸形 uri；而这个模块里已经有
+ *   一处按 `lastIndexOf('/')` 切 rkey 的写法（`enqueueDeletes`），两处解析一旦
+ *   不是同一次结果就会不一致。
+ * - 最实际的好处：`succeed()` 里那句 `if (row.kind === 'put' && cid)` 会**自动**
+ *   不再命中 like 行。否则那句「按 `row.uri` 回写 `posts.atproto_cid`」是靠
+ *   「like 的 uri 恰好不等于任何 `posts.atproto_uri`」这个巧合才安全的。
+ */
+type OutboxKind = 'put' | 'delete' | 'put-like' | 'delete-like'
+
+/** 本站发出的赞用确定性 rkey：`pbhh-like-<posts.id>`。见模块说明第 4 条与不变量 L。 */
+function localLikeRkey(postId: number): string {
+  return `pbhh-like-${postId}`
+}
 
 /** 一次 tick 最多处理多少行。单行是一次网络往返，串行发送。 */
 const BATCH_SIZE = 20
@@ -342,6 +370,124 @@ export function enqueueDeletes(username: string, rows: OutboundDelete[]): void {
   })
 }
 
+/**
+ * 点赞 / 取消赞后调用。与 `mirrorLocalPost` 同形：同步、无 await、显式调用。
+ *
+ * **闸门的方向在这里必须分清**，不能照抄 `mirrorLocalPost` 的顺序：
+ *
+ * 1. 未绑定 → 返回。
+ * 2. **`publishEnabled` 只闸住「点赞」，不闸住「取消赞」** —— 与 `enqueueDeletes`
+ *    逐字同理（见上面那段注释）。搞反的后果是**保证发散**：用户开着开关赞了（Bluesky
+ *    上真有一条记录）→ 关掉开关 → 回来取消赞 → 那条记录**永远留在 Bluesky**，而本站
+ *    显示未赞。
+ * 3. `liked === true` 再依次三道闸，见下。
+ *
+ * `retractUri` 由 `toggleLike` 交出 —— 它删掉的那一行上的 `atproto_uri`。所以
+ * 「在 Bluesky 官方客户端点的赞、回本站取消」也能撤回：那时 rkey 是 TID，不是
+ * `pbhh-like-`。
+ */
+export function mirrorLocalLike(input: {
+  username: string
+  postId: number
+  liked: boolean
+  /** 仅在 `liked === false` 时有意义：要撤回的那条 like 记录的 at-uri。 */
+  retractUri: string | null
+}): void {
+  const identity = AtprotoService.getIdentity(input.username)
+  if (!identity)
+    return
+
+  if (!input.liked) {
+    if (!input.retractUri)
+      return
+    const uri = input.retractUri
+    db.transaction((tx: Tx) => {
+      // 还没发就别发了 —— 下面那条 delete 已经表达了最终状态。**只省一次投递尝试，
+      // 不承重**：`deliverLike` 在发送时刻会复查本地行，取消之后那行已经没了 ⇒ 直接
+      // drop。留着是因为它让「一 tick 内 赞→取消」不必白跑一次网络。
+      tx.delete(atprotoOutbox)
+        .where(and(eq(atprotoOutbox.uri, uri), eq(atprotoOutbox.kind, 'put-like')))
+        .run()
+      tx.insert(atprotoOutbox)
+        .values({
+          did: identity.did,
+          username: input.username,
+          kind: 'delete-like',
+          rkey: uri.slice(uri.lastIndexOf('/') + 1),
+          uri,
+          record: null,
+        })
+        .onConflictDoNothing({ target: [atprotoOutbox.uri, atprotoOutbox.kind] })
+        .run()
+    })
+    return
+  }
+
+  if (!identity.publishEnabled)
+    return
+
+  const like = db
+    .select({ atprotoUri: postLikes.atprotoUri })
+    .from(postLikes)
+    .where(and(eq(postLikes.postId, input.postId), eq(postLikes.username, input.username)))
+    .get()
+  // 行没了 = 调用方与 `toggleLike` 不同步，或者用户取消得比这次调用快。不入队。
+  if (!like)
+    return
+  // **幂等，也是防重复记录**：用户在 Bluesky 刚赞了、回环还没到，此时在本站也点一下，
+  // 没有这道闸就会在他 repo 里造出**第二条** like 记录（TID 那条 + `pbhh-like-N`），
+  // 而本地只有一行。
+  if (like.atprotoUri)
+    return
+
+  const post = db
+    .select({ atprotoUri: posts.atprotoUri })
+    .from(posts)
+    .where(eq(posts.id, input.postId))
+    .get()
+  // 这条帖在 Bluesky 上不存在 ⇒ 赞只能留在站内。这是「赞一条纯站内帖」的正常路径，
+  // 不是错误，所以不入队、不记日志。
+  if (!post?.atprotoUri)
+    return
+
+  const rkey = localLikeRkey(input.postId)
+  const uri = atUri(identity.did, LIKE_COLLECTION, rkey)
+
+  db.transaction((tx: Tx) => {
+    // 不变量 L 的 like 版：uri 先于任何网络调用写好。
+    tx.update(postLikes)
+      .set({ atprotoUri: uri })
+      .where(and(eq(postLikes.postId, input.postId), eq(postLikes.username, input.username)))
+      .run()
+
+    // **这一步是承重的，不是双保险。** 赞 → 取消 → 再赞，全在 3 秒的一个 tick 内：
+    // 上一轮取消留下的 `delete-like` 还在队列里，而 `(uri, kind)` 唯一索引会把下面
+    // 这次 put 吸收掉 —— 队列停在 `[put, delete]`，FIFO 先发 put 再发 delete
+    // ⇒ **Bluesky 上没赞、本站显示已赞**。
+    tx.delete(atprotoOutbox)
+      .where(and(eq(atprotoOutbox.uri, uri), eq(atprotoOutbox.kind, 'delete-like')))
+      .run()
+
+    tx.insert(atprotoOutbox)
+      .values({
+        did: identity.did,
+        username: input.username,
+        kind: 'put-like',
+        rkey,
+        uri,
+        // **外壳，不含 `subject`** —— 它在发送时刻才现造（模块说明第 5 条）。这里的
+        // `createdAt` 是唯一知道用户真正何时点赞的地方：`post_likes` 没有时间列，
+        // 而退避重试可能把这个赞推迟一小时才发出去。
+        record: JSON.stringify({
+          $type: LIKE_COLLECTION,
+          createdAt: new Date().toISOString(),
+        }),
+      })
+      .onConflictDoNothing({ target: [atprotoOutbox.uri, atprotoOutbox.kind] })
+      .run()
+  })
+}
+
 // ─── 投递 ─────────────────────────────────────────────────────────────────────
 
 type OutboxRow = typeof atprotoOutbox.$inferSelect
@@ -371,6 +517,11 @@ function succeed(row: OutboxRow, cid: string | null): void {
   db.transaction((tx: Tx) => {
     // 「两列都非空」等价于「这条帖已成功发布」（见 schema）。cid 只有 putRecord 返回
     // 之后才有，所以在这里补，而不是入队时乐观写。
+    //
+    // **`kind === 'put'` 这个收窄是承重的**（`kind` 把 collection 编进去的主要收益）：
+    // 落到这里来的还有 `put-like` 行，而它的 uri 是 `.../app.bsky.feed.like/...`，
+    // 与任何 `posts.atproto_uri` 都不相等。靠「恰好不相等」来保证安全是隐式巧合 ——
+    // 这里显式把它排除掉。like 的任何东西**都不许**回写 `posts`。
     if (row.kind === 'put' && cid)
       tx.update(posts).set({ atprotoCid: cid }).where(eq(posts.atprotoUri, row.uri)).run()
     tx.delete(atprotoOutbox).where(eq(atprotoOutbox.id, row.id)).run()
@@ -412,8 +563,24 @@ function fail(row: OutboxRow, err: unknown, permanent = false): void {
   console.warn(`[outbox] ${row.kind} ${row.uri} 第 ${attempts} 次失败，${Math.round(backoff / 1000)} 秒后重试:`, err)
 }
 
+/**
+ * 按 `kind` 分派。**四个分支各自明确**，判错 kind 的代价是往用户的 repo 里发错东西。
+ */
 async function deliver(row: OutboxRow): Promise<void> {
-  if (row.kind === 'put') {
+  const kind = row.kind as OutboxKind
+  if (kind === 'put' || kind === 'delete') {
+    await deliverPost(row, kind)
+    return
+  }
+  if (kind === 'put-like' || kind === 'delete-like') {
+    await deliverLike(row, kind)
+    return
+  }
+  fail(row, new Error(`未知的 kind: ${row.kind}`), true)
+}
+
+async function deliverPost(row: OutboxRow, kind: 'put' | 'delete'): Promise<void> {
+  if (kind === 'put') {
     const post = db
       .select({ id: posts.id, parentId: posts.parentId, deleted: posts.deleted })
       .from(posts)
@@ -440,7 +607,7 @@ async function deliver(row: OutboxRow): Promise<void> {
     }
 
     if (outboundMode() === 'dry') {
-      console.warn(`[outbox] 【干跑·未发送】putRecord ${row.uri} ${JSON.stringify(built.record)}`)
+      console.warn(`[outbox] 【干跑·未发送】putRecord ${POST_COLLECTION} ${row.uri} ${JSON.stringify(built.record)}`)
       succeed(row, null)
       return
     }
@@ -456,13 +623,8 @@ async function deliver(row: OutboxRow): Promise<void> {
     return
   }
 
-  if (row.kind !== 'delete') {
-    fail(row, new Error(`未知的 kind: ${row.kind}`), true)
-    return
-  }
-
   if (outboundMode() === 'dry') {
-    console.warn(`[outbox] 【干跑·未发送】deleteRecord ${row.uri}`)
+    console.warn(`[outbox] 【干跑·未发送】deleteRecord ${POST_COLLECTION} ${row.uri}`)
     succeed(row, null)
     return
   }
@@ -477,6 +639,127 @@ async function deliver(row: OutboxRow): Promise<void> {
   }
   catch (err) {
     // 记录本来就不在 = 正是我们想要的状态。幂等，算成功 —— 否则重试会一直失败到死。
+    if (err instanceof XRPCError && err.error === 'RecordNotFound') {
+      succeed(row, null)
+      return
+    }
+    throw err
+  }
+  succeed(row, null)
+}
+
+/**
+ * `subject` 的解析结果。**三种结局的处置完全不同**，与 `ReplyRefs` 同一个道理 ——
+ * 只是这里只有一环，没有父链要爬。
+ *
+ * - `gone`：本地那行赞已经没了（用户取消得比投递快），或目标帖根本不在 Bluesky 上。
+ *   终态，丢弃。
+ * - `pending`：目标帖的 `atproto_cid` 还没回来 —— 它自己的 put 还在队列里。**必须重试**，
+ *   这是本模块第 5 条约束要防的那个静默丢失。
+ */
+type LikeSubject =
+  | { kind: 'ok', subject: StrongRef }
+  | { kind: 'gone' }
+  | { kind: 'pending' }
+
+function resolveLikeSubject(uri: string): LikeSubject {
+  const like = db
+    .select({ postId: postLikes.postId })
+    .from(postLikes)
+    .where(eq(postLikes.atprotoUri, uri))
+    .get()
+  if (!like)
+    return { kind: 'gone' }
+
+  const post = db
+    .select({
+      atprotoUri: posts.atprotoUri,
+      atprotoCid: posts.atprotoCid,
+      deleted: posts.deleted,
+    })
+    .from(posts)
+    .where(eq(posts.id, like.postId))
+    .get()
+  // 帖被软删 = 它在 Bluesky 上的记录也正在被删，这个赞没有意义了。
+  if (!post || post.deleted || !post.atprotoUri)
+    return { kind: 'gone' }
+  if (!post.atprotoCid)
+    return { kind: 'pending' }
+
+  return { kind: 'ok', subject: { uri: post.atprotoUri, cid: post.atprotoCid } }
+}
+
+/**
+ * 把入队时存下的外壳补成完整记录。
+ *
+ * `createdAt` **必须用外壳里那个**（入队时刻），不能用此刻：退避重试可能把它推迟一小时，
+ * 而 `post_likes` 没有时间列，入队那一刻是唯一知道用户真正何时点赞的地方。
+ */
+function buildLikeRecord(row: OutboxRow, subject: StrongRef): Record<string, unknown> | null {
+  if (!row.record)
+    return null
+  try {
+    return { ...JSON.parse(row.record) as Record<string, unknown>, subject }
+  }
+  catch {
+    return null
+  }
+}
+
+async function deliverLike(row: OutboxRow, kind: 'put-like' | 'delete-like'): Promise<void> {
+  if (kind === 'put-like') {
+    const resolved = resolveLikeSubject(row.uri)
+    if (resolved.kind === 'gone') {
+      drop(row, '本地赞已取消，或目标帖不在 Bluesky 上')
+      return
+    }
+    // 非永久失败：给它退避，下个 tick 目标帖的 cid 可能就到位了。
+    if (resolved.kind === 'pending') {
+      fail(row, new Error('目标帖的 cid 尚未就绪'), false)
+      return
+    }
+
+    const record = buildLikeRecord(row, resolved.subject)
+    if (!record) {
+      fail(row, new Error('put-like 行没有 record'), true)
+      return
+    }
+
+    if (outboundMode() === 'dry') {
+      console.warn(`[outbox] 【干跑·未发送】putRecord ${LIKE_COLLECTION} ${row.uri} ${JSON.stringify(record)}`)
+      succeed(row, null)
+      return
+    }
+
+    const agent = await agentFor(row.did)
+    await agent.com.atproto.repo.putRecord({
+      repo: row.did,
+      collection: LIKE_COLLECTION,
+      rkey: row.rkey,
+      record,
+    })
+    // 不回写 cid：`post_likes` 没有这一列，而 `subject.cid` 取自目标帖那行。
+    succeed(row, null)
+    return
+  }
+
+  if (outboundMode() === 'dry') {
+    console.warn(`[outbox] 【干跑·未发送】deleteRecord ${LIKE_COLLECTION} ${row.uri}`)
+    succeed(row, null)
+    return
+  }
+
+  const agent = await agentFor(row.did)
+  try {
+    await agent.com.atproto.repo.deleteRecord({
+      repo: row.did,
+      collection: LIKE_COLLECTION,
+      rkey: row.rkey,
+    })
+  }
+  catch (err) {
+    // 与帖的删除同理：记录本来就不在 = 正是我们想要的状态。**这一条是承重的** ——
+    // 上层的「收敛」会无条件给旧 uri 入一条 delete，那条记录十有八九从没投递成功过。
     if (err instanceof XRPCError && err.error === 'RecordNotFound') {
       succeed(row, null)
       return
@@ -549,18 +832,39 @@ export function stopOutbox(): void {
   timer = null
 }
 
+/**
+ * 可观测性端点用。**按 kind 分列** —— 赞进队列之后，混在一起的 `pending: 3` 不再能
+ * 指导排查：「3 条待发帖子」和「3 条待发赞」是完全不同的两件事，前者要等 cid、后者
+ * 只要目标帖就绪。
+ *
+ * `pending` / `dead` 保留为总数，是为了让这个端点的老读者（和人肉 `curl`）不至于看到
+ * 一个空的形状。
+ */
 export function getOutboxStatus() {
-  const stat = (status: string) => db
-    .select({ n: count() })
-    .from(atprotoOutbox)
-    .where(eq(atprotoOutbox.status, status))
-    .get()
-    ?.n ?? 0
+  function stat(status: string, kinds?: string[]) {
+    return db
+      .select({ n: count() })
+      .from(atprotoOutbox)
+      .where(kinds
+        ? and(eq(atprotoOutbox.status, status), inArray(atprotoOutbox.kind, kinds))
+        : eq(atprotoOutbox.status, status))
+      .get()
+      ?.n ?? 0
+  }
 
   return {
     mode: outboundMode(),
     started,
     pending: stat('pending'),
     dead: stat('dead'),
+    // `kind` 是无约束的文本列，未知值不落在任何一组里 —— 所以两组之和不等于总数是
+    // **正常的**，别把它当成漏算。
+    byKind: {
+      post: { pending: stat('pending', ['put', 'delete']), dead: stat('dead', ['put', 'delete']) },
+      like: {
+        pending: stat('pending', ['put-like', 'delete-like']),
+        dead: stat('dead', ['put-like', 'delete-like']),
+      },
+    },
   }
 }

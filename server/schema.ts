@@ -63,8 +63,26 @@ export const posts = sqliteTable('posts', {
 export const postLikes = sqliteTable('post_likes', {
   postId: integer('post_id').notNull().references(() => posts.id),
   username: text('username').notNull().references(() => users.username),
+  /**
+   * 这条赞对应的 `app.bsky.feed.like` 记录的 at-uri。**含义是「这条 (post, user)
+   * 赞目前对应的、最近观测到的真实记录地址」**，而不是「我们发出去的那条」。
+   *
+   * 本站发出的赞是确定性地址 `.../pbhh-like-<postId>`；从 Bluesky 同步回来的是
+   * 真实记录的地址（rkey 是 TID）。用户在别的客户端重新点时，这一列会被改指到
+   * 那条新记录 —— **因为客户端只会删掉它自己知道的那条**，存错一条就等于用户的
+   * 取消永远落不了地。
+   *
+   * 非有不可的另一个理由：取消赞的 JetStream 事件不带 `record`（读不到 subject），
+   * 只能靠这个地址反查。
+   *
+   * NULL = 这条赞只存在于本站（未绑定、或关掉了发布开关时点的）。
+   */
+  atprotoUri: text('atproto_uri'),
 }, table => [
   primaryKey({ columns: [table.postId, table.username] }),
+  // 理由与 `posts_atproto_uri_unique` 完全相同（见上面那段）：普通唯一索引即可，
+  // SQLite 本来就把多个 NULL 当彼此不同。按 uri 反查撤回目标是它唯一的用途。
+  uniqueIndex('post_likes_atproto_uri_unique').on(table.atprotoUri),
 ])
 
 export const userBindings = sqliteTable('user_bindings', {
@@ -188,6 +206,14 @@ export const atprotoIdentities = sqliteTable('atproto_identities', {
   pdsUrl: text('pds_url').notNull(),
   /** 是否把本站新帖同步发到用户 PDS。默认开，用户可在设置页关掉。 */
   publishEnabled: integer('publish_enabled', { mode: 'boolean' }).notNull().default(true),
+  /**
+   * 是否把用户**在 Bluesky 上点的赞**同步进来。默认开。
+   *
+   * 刻意**不叫 `syncEnabled`**：它只盖住入站点赞，不盖住入站帖子 —— 帖子的镜像
+   * 至今没有任何开关，本轮也没加。名字承诺的范围必须等于实际做事的范围，否则
+   * 下一个人会以为关掉它能停止整条读路径。设置页的文案要把这个不对称写清楚。
+   */
+  syncLikesEnabled: integer('sync_likes_enabled', { mode: 'boolean' }).notNull().default(true),
   createdAt: integer('created_at', { mode: 'timestamp' }).notNull().$defaultFn(() => new Date()),
 })
 

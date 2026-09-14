@@ -149,7 +149,7 @@ post:
   comments: 评论
   readMore: 展开全文
   mirrored: 来自 Bluesky
-  mirroredHint: 这条帖同步自 TA 的 Bluesky 账号，赞数只算本站的（不含 Bluesky），你在这里点赞也不会同步过去。
+  mirroredHint: 这条帖同步自 TA 的 Bluesky 账号，赞数只算本站的（不含 Bluesky）。如果你绑定了 atproto，你在这里点的赞也会发到你自己的 Bluesky。
   notFound: 题壁不存在
   replyCount: '{n} 条回复'
   reply:
@@ -229,9 +229,9 @@ bind:
     currentDid: DID：
     intro: 填入你已有的 atproto handle（例如 alice.bsky.social），授权通过后就能把 <username>.pbhh.net 设成主页地址。
     syncNote: 绑定后你在 Bluesky 新发的帖子会同步到这里的题壁，最近 50 条历史帖也会一并回填。
-    replyNote: 但别人在你的帖子下留的回复不会同步过来，在同步帖上点的赞也只留在本站。
-    publishLabel: 把这里的题壁同步发到 Bluesky
-    publishHint: 关掉后只有新发的题壁不再发过去，已经发出去的不受影响。
+    replyNote: 但别人在你的帖子下留的回复不会同步过来，别人对你帖子的赞也一样。
+    publishLabel: 把这里的题壁和点赞同步发到 Bluesky
+    publishHint: 关掉后新发的题壁和新的点赞不再发过去，已经发出去的不受影响。取消赞仍然会收回 Bluesky 上对应的那条记录。
     publishFailed: 开关没能保存，请稍后再试
     unbindKeepsPosts: 解绑不会删除你在 Bluesky 上已经发布的帖子。
     handleLabel: atproto handle

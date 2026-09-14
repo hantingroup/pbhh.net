@@ -169,6 +169,13 @@
       "when": 1789319347138,
       "tag": "0023_wet_steel_serpent",
       "breakpoints": true
+    },
+    {
+      "idx": 24,
+      "version": "6",
+      "when": 1789359747063,
+      "tag": "0024_ordinary_ultron",
+      "breakpoints": true
     }
   ]
 }
