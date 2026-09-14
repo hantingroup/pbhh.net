@@ -9,7 +9,27 @@ import { API_ORIGIN, IS_LOOPBACK } from './config'
 /** 授权流程里 state 的有效期，超过就当作废。 */
 export const STATE_TTL_MS = 60 * 60 * 1000
 
-const SCOPE = 'atproto'
+/**
+ * 向用户申请的 OAuth scope。
+ *
+ * **`atproto` 本身不授予任何权限**——规范里它的地位相当于 `openid`，只是声明「这是
+ * atproto 形态的 OAuth」。只有它的时候，`putRecord` / `deleteRecord` 会被 PDS 以
+ * `Missing required scope "repo:app.bsky.feed.like?action=create"` 拒绝，于是
+ * **出站半边整体失效**（本站的帖和赞都发不出去）。这个失败发生在**投递时刻**，
+ * 表现只是 outbox 行反复重试，从「站点一切正常」走到发现它要绕一圈，实测花掉了
+ * 一整天。
+ *
+ * `transition:generic` 是规范提供的迁移态 scope，语义等同于旧的 App Password 授权
+ * 级别：允许写**任何**仓库记录类型，只排除账号管理与私信（`chat.bsky.*`）。选它而
+ * 不是逐条列 `repo:<nsid>?action=…` 的理由是「以后加转发 / 关注 / 改资料不必再让用户
+ * 重新授权一次」，代价是授权页显示「完全访问」——**这两句必须一起看**，别只看其中
+ * 一句就把它改窄或改宽。
+ *
+ * ⚠️ **改这里对已存在的会话无效**：授予的 scope 存在会话里，`restore()` 拿到的永远是
+ * 当初授予的那一份。改宽之后老用户必须**解绑重绑**才拿得到新 scope，否则会继续沿用
+ * 旧 scope 失败到 `dead`。
+ */
+const SCOPE = 'atproto transition:generic'
 
 /**
  * Bun 上没有 `process.versions.undici`，`@atproto-labs/fetch-node` 的 SSRF
