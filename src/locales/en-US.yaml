@@ -157,6 +157,11 @@ post:
   mirroredHint: This post was synced from their Bluesky account. The like count here is this site's own — Bluesky likes are not included. If you have atproto linked, likes you leave here also go to your own Bluesky.
   notFound: Post not found
   replyCount: '{n} replies'
+  thread:
+    expand: Show {n} replies
+    expandDeeper: Show {n} deeper replies
+    collapse: Hide {n} replies
+    continue: View {n} more replies
   reply:
     placeholder: Write your reply...
     submit: Reply

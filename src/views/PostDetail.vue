@@ -283,6 +283,10 @@ watch(() => props.id, load)
           <span class="text-sm font-semibold">{{ t('post.comments') }}</span>
           <Separator class="flex-1" />
         </div>
+        <!--
+          `space-y-3`（0.75rem）必须与 `PostThreadNode` 里的 `--thread-gap` 一致 ——
+          顶层这几条评论和更深的那些是同一棵树，两个值不一样就会一层紧一层松。
+        -->
         <div class="space-y-3">
           <PostThreadNode
             v-for="item in threadTree"

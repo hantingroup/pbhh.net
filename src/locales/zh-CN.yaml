@@ -152,6 +152,11 @@ post:
   mirroredHint: 这条帖同步自 TA 的 Bluesky 账号，赞数只算本站的（不含 Bluesky）。如果你绑定了 atproto，你在这里点的赞也会发到你自己的 Bluesky。
   notFound: 题壁不存在
   replyCount: '{n} 条回复'
+  thread:
+    expand: 展开 {n} 条回复
+    expandDeeper: 展开 {n} 条更深回复
+    collapse: 收起 {n} 条回复
+    continue: 查看后续 {n} 条回复
   reply:
     placeholder: 写下你的回复…
     submit: 回复
