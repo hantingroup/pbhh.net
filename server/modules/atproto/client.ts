@@ -32,6 +32,83 @@ export const STATE_TTL_MS = 60 * 60 * 1000
 const SCOPE = 'atproto transition:generic'
 
 /**
+ * DNS TXT 那半条路。
+ *
+ * `resolveTxt` 的契约是「查不到就返回 null」（库的 TSDoc：*Return `null` if the
+ * hostname successfully does not resolve to a valid DID.*），但 `node:dns` 查不到时是
+ * **抛错**：NXDOMAIN / 只有别的记录类型是 ENOTFOUND，名字存在但没有 TXT 是 ENODATA。
+ * 这两种都属于「成功地解析出没有」，必须还原成 null。
+ *
+ * 为什么这个还原是**必需**的，而不是锦上添花：`AtprotoHandleResolver` 并行发起 DNS
+ * 与 HTTPS 两个请求、先 await DNS，而它只给 HTTPS 那个挂了 `.catch(noop)`，await DNS
+ * 的这行没有兜底。所以这里一抛错，整个解析就炸 —— 哪怕 HTTPS 那条路早就取到了 DID。
+ * Bluesky 的 `*.bsky.social` 一律用 HTTPS 发布 DID、不设 `_atproto` TXT，于是这个抛错
+ * 会让**每一个** Bluesky 用户都绑不上，且报出的还是「handle 不存在」这种误导性原因。
+ *
+ * 其余错误码（超时、SERVFAIL…）同样返回 null 而不抛：HTTPS 那条路仍然是有效的，
+ * DNS 只是兜底，不该因为兜底失败而拖垮主路径。
+ */
+async function resolveTxt(domain: string): Promise<string[] | null> {
+  try {
+    const records = await dns.resolveTxt(domain)
+    return records.map(parts => parts.join(''))
+  }
+  catch (err) {
+    const code = (err as NodeJS.ErrnoException).code
+    if (code !== 'ENOTFOUND' && code !== 'ENODATA')
+      console.error(`[atproto] DNS TXT lookup for ${domain} failed unexpectedly (${code}):`, err)
+    return null
+  }
+}
+
+/**
+ * 句柄解析器，**分两层**：外层是我们包的，内层是库的 `AtprotoHandleResolver`。
+ *
+ * **外层这一层不是多余的**，它修的是一个实测踩到的坑。库的 `HandleResolver` 契约写得
+ * 很清楚（`@atproto-labs/handle-resolver` 的 types.d.ts）：`null` **只在解析过程没有
+ * 异常时**才该返回，「unexpected error」要**抛出去**。但 `AtprotoHandleResolver` 的
+ * HTTP 那半（`WellKnownHandleResolver`）把所有异常都 catch 掉再返回 `null` —— 库自己
+ * 也知道，所以才提供 `onError` 这个「只观察、不改变返回值」的钩子，d.ts 里的原话是
+ * 「the only strategy that swallows failures」。
+ *
+ * **为什么必须把它掰回来**：`@atproto/oauth-client` 会在我们传进去的实例外面再包一层
+ * `CachedHandleResolver`，而它的 `CachedGetter` 是 `await this.setStored(key, value)`
+ * **无条件**写入的 —— `null` 会被当成正常结果缓存，TTL **10 分钟**；读取时判的是
+ * `storedValue !== undefined`，所以 `null` 会命中。于是**一次网络抖动等于接下来 10 分钟
+ * 里每次重试都以「handle 不存在」失败**。2026-09-14 实测正是如此：本机到 Bluesky 的
+ * 出站全走 mihomo 代理，代理的 DNS 抖了一下，用户连着 8 次被告知 handle 不存在，而它
+ * 一直是好的；独立进程的探针有空缓存，所以完全复现不出来。
+ *
+ * 抛出去则完全不同：`CachedGetter` 的 `.catch` 挂在 `.then(setStored)` **之前**，被拒绝
+ * 的那一路根本不会写缓存。所以规则是 —— **HTTP 那条路报过错，就抛**；两条路都干净地
+ * 没找到，才返回 `null`。
+ *
+ * 对用户而言这两种结局**没有差别**：真的不存在时原先返回 `null`，`AtprotoIdentityResolver`
+ * 会抛「does not resolve to a DID」，路由照样映射成 `authorizeFailed`。变的只是「抖动不再
+ * 被缓存成一条 10 分钟的假结论」。
+ */
+function createBunHandleResolver() {
+  return {
+    async resolve(handle: string, options?: { signal?: AbortSignal, noCache?: boolean }) {
+      // 每次调用现建内层实例：`onError` 在 `resolve()` 返回**之前**同步触发，所以下面
+      // 读到的必然是本次的因。共用一个实例的话并发解析会互相串味（A 的异常被 B 读到）。
+      let wellKnownError: unknown
+      const inner = new AtprotoHandleResolver({
+        fetch: globalThis.fetch,
+        resolveTxt,
+        onError: (err) => { wellKnownError = err },
+      })
+      const did = await inner.resolve(handle, options)
+      if (did)
+        return did
+      if (wellKnownError !== undefined)
+        throw wellKnownError
+      return null
+    },
+  }
+}
+
+/**
  * Bun 上没有 `process.versions.undici`，`@atproto-labs/fetch-node` 的 SSRF
  * dispatcher 会在 `buildDispatcher` 里直接抛错（"Unicast SSRF protection
  * requires Node.js 20.6+"）。绕开它的办法是自己提供 `handleResolver` —— 基础包
@@ -42,35 +119,7 @@ const SCOPE = 'atproto transition:generic'
  * 另见仓库根的 `patches/`：静态 import 的 undici@8 在 Bun 上模块体就会抛错，
  * 那个补丁让它变成惰性 import，否则本包根本无法被 import。
  */
-const handleResolver = new AtprotoHandleResolver({
-  fetch: globalThis.fetch,
-  resolveTxt: async (domain: string) => {
-    try {
-      const records = await dns.resolveTxt(domain)
-      return records.map(parts => parts.join(''))
-    }
-    catch (err) {
-      // `resolveTxt` 的契约是「查不到就返回 null」，库的 TSDoc 写得很清楚：
-      // "Return `null` if the hostname successfully does not resolve to a valid
-      // DID."。但 `node:dns` 查不到时是**抛错**：NXDOMAIN/只有别的记录类型
-      // 是 ENOTFOUND，名字存在但没有 TXT 是 ENODATA。这两种都属于「成功地解析
-      // 出没有」，必须还原成 null。
-      //
-      // 为什么这个还原是**必需**的，而不是锦上添花：`AtprotoHandleResolver`
-      // 并行发起 DNS 与 HTTPS 两个请求、先 await DNS，而它只给 HTTPS 那个挂了
-      // `.catch(noop)`，await DNS 的这行没有兜底。所以这里一抛错，整个解析就炸
-      // —— 哪怕 HTTPS 那条路早就取到了 DID。Bluesky 的 `*.bsky.social` 一律用
-      // HTTPS 发布 DID、不设 `_atproto` TXT，于是这个抛错会让**每一个** Bluesky
-      // 用户都绑不上，且报出的还是「handle 不存在」这种误导性原因。
-      const code = (err as NodeJS.ErrnoException).code
-      if (code !== 'ENOTFOUND' && code !== 'ENODATA')
-        console.error(`[atproto] DNS TXT lookup for ${domain} failed unexpectedly (${code}):`, err)
-      // 其余错误码（超时、SERVFAIL…）同样返回 null 而不抛：HTTPS 那条路仍然是
-      // 有效的，DNS 只是兜底，不该因为兜底失败而拖垮主路径。
-      return null
-    }
-  },
-})
+const handleResolver = createBunHandleResolver()
 
 /**
  * 串行化同一个 key 上的会话刷新。缺了它库会打印 "No lock mechanism provided.
