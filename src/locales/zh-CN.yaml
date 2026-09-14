@@ -226,6 +226,8 @@ bind:
     currentHandle: 当前 atproto handle：
     currentDid: DID：
     intro: 填入你已有的 atproto handle（例如 alice.bsky.social），授权通过后就能把 <username>.pbhh.net 设成主页地址。
+    syncNote: 绑定后你在 Bluesky 新发的帖子会同步到这里的题壁，最近 50 条历史帖也会一并回填。
+    replyNote: 但别人在你的帖子下留的回复不会同步过来，在同步帖上点的赞也只留在本站。
     handleLabel: atproto handle
     handlePlaceholder: alice.bsky.social
     handleRequired: 请填写 atproto handle

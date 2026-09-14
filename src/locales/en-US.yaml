@@ -236,6 +236,12 @@ bind:
     intro: >-
       Enter the atproto handle you already have (for example alice.bsky.social).
       Once authorized you can set <username>.pbhh.net as your profile address.
+    syncNote: >-
+      Posts you publish on Bluesky after linking show up in the wall here, along
+      with your 50 most recent existing posts.
+    replyNote: >-
+      Replies other people leave on your posts are not synced, and likes on
+      synced posts stay on this site only.
     handleLabel: atproto handle
     handlePlaceholder: alice.bsky.social
     handleRequired: Please enter your atproto handle

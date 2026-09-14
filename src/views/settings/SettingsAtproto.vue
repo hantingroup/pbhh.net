@@ -213,6 +213,10 @@ async function unbind() {
             </p>
           </div>
 
+          <p class="text-xs text-muted-foreground">
+            {{ t('bind.atproto.syncNote') }}
+          </p>
+
           <AlertDialog>
             <AlertDialogTrigger as-child>
               <Button variant="outline" class="w-full text-destructive hover:text-destructive" :disabled="unbinding">
@@ -244,6 +248,17 @@ async function unbind() {
         <template v-else>
           <p class="text-sm text-muted-foreground">
             {{ t('bind.atproto.intro') }}
+          </p>
+
+          <!--
+            这两句是刻意写在「绑定前」的。别人对同步帖的回复不会过来，是这套机制
+            最容易被误解的地方 —— 事后再解释只会变成工单。
+          -->
+          <p class="text-xs text-muted-foreground">
+            {{ t('bind.atproto.syncNote') }}
+          </p>
+          <p class="text-xs text-muted-foreground">
+            {{ t('bind.atproto.replyNote') }}
           </p>
 
           <Alert v-if="!binding.configured" variant="destructive">

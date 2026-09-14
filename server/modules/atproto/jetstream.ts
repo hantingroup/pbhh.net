@@ -1,6 +1,7 @@
-import { and, eq } from 'drizzle-orm'
-import { atprotoCursor, db, posts } from 'server/database'
-import { bus } from '../events/bus'
+import type { MirrorOutcome, Tx } from './mirror'
+import { eq } from 'drizzle-orm'
+import { atprotoCursor, db } from 'server/database'
+import { mirrorDelete, mirrorRecord, POST_COLLECTION, publishMirrored } from './mirror'
 import * as AtprotoService from './service'
 
 /**
@@ -21,7 +22,7 @@ import * as AtprotoService from './service'
 
 const JETSTREAM_ORIGIN = 'wss://jetstream.us-east.bsky.network'
 const SUBSCRIBE_PATH = '/xrpc/network.bsky.jetstream.subscribeEvents'
-const WANTED_COLLECTIONS = ['app.bsky.feed.post']
+const WANTED_COLLECTIONS = [POST_COLLECTION]
 /** `identity` 是免费的：`collections` 只约束 commit 事件，它会照常流过。 */
 const WANTED_KINDS = ['commit', 'identity', 'account']
 const CURSOR_KEY = 'jetstream'
@@ -47,14 +48,8 @@ const FATAL_RETRY_MS = 30 * 60 * 1000
 const MAX_BACKOFF_MS = 60 * 1000
 /** 同一个 seq 反复失败多少次后放弃重放、直接跳过。防毒丸事件把读路径钉死在重连循环里。 */
 const MAX_REPLAYS = 5
-/** `record.createdAt` 的可信窗口，之外一律回退事件自身的 `time`。 */
-const MAX_FUTURE_MS = 5 * 60 * 1000
-const MAX_PAST_MS = 365 * 24 * 60 * 60 * 1000
 
 // ─── 类型 ─────────────────────────────────────────────────────────────────────
-
-/** drizzle 事务对象。用 `Parameters` 推导而不是手写泛型，省掉 schema 类型参数。 */
-type Tx = Parameters<Parameters<typeof db.transaction>[0]>[0]
 
 interface CommitPayload {
   $type?: string
@@ -75,22 +70,6 @@ interface IdentityPayload {
   did: string
   time: string
   identity?: { did?: string, handle?: string }
-}
-
-/**
- * 镜像成功后要补发的事件。收集起来在**事务提交之后**再发 —— 事务里发会在回滚时
- * 留下幽灵事件。
- */
-interface MirrorOutcome {
-  username: string
-  postId: number
-  uri: string
-  cid: string
-  did: string
-  handle?: string
-  rkey: string
-  time: string
-  record: Record<string, unknown>
 }
 
 // ─── URL 拼装（参数名唯一的出口）───────────────────────────────────────────────
@@ -190,129 +169,29 @@ function resetCursor(floor: number): void {
 
 // ─── 镜像规则 ─────────────────────────────────────────────────────────────────
 
-function atUri(did: string, collection: string, rkey: string): string {
-  return `at://${did}/${collection}/${rkey}`
-}
-
 /**
- * `record.createdAt` 是客户端声明的发帖时间，`payload.time` 是服务端观测时刻
- * （实测差 1.7 秒），所以优先用前者。但**必须夹取**：一条 `createdAt: "2099-01-01"`
- * 的帖会永久钉在题壁流顶部，而解析失败也不能让 `NaN` 进库。
+ * 规则本身住在 `mirror.ts`（回填与实时流共用同一份，见那里的说明）。这里只做
+ * 「commit 事件 → 记录」的翻译：delete 走软删，update 带 `isUpdate` 标记，其余
+ * 一律按 create。
  */
-function clampCreatedAt(value: unknown, fallbackIso: string): Date {
-  const fallback = new Date(fallbackIso)
-  const base = Number.isNaN(fallback.getTime()) ? new Date() : fallback
-  if (typeof value !== 'string')
-    return base
-  const parsed = new Date(value)
-  if (Number.isNaN(parsed.getTime()))
-    return base
-  const delta = parsed.getTime() - Date.now()
-  if (delta > MAX_FUTURE_MS || delta < -MAX_PAST_MS)
-    return base
-  return parsed
-}
-
-/** 回复的父锚点 URI；`undefined` = 不是回复。形状不对时返回 `null`（调用方跳过）。 */
-function readReplyParentUri(record: Record<string, unknown>): string | null | undefined {
-  if (record.reply === undefined)
-    return undefined
-  const reply = record.reply
-  if (typeof reply !== 'object' || reply === null)
-    return null
-  const parent = (reply as { parent?: unknown }).parent
-  if (typeof parent !== 'object' || parent === null)
-    return null
-  const uri = (parent as { uri?: unknown }).uri
-  return typeof uri === 'string' && uri ? uri : null
-}
-
 function mirrorCommit(tx: Tx, payload: CommitPayload): MirrorOutcome[] {
-  if (payload.collection !== 'app.bsky.feed.post')
+  if (payload.collection !== POST_COLLECTION)
     return []
-
-  // 只订了已绑定身份的 repo，但解绑与事件到达可以并发，所以要再确认一次。
-  const identity = AtprotoService.getIdentityByDid(payload.did)
-  if (!identity)
-    return []
-  const username = identity.username
-  const uri = atUri(payload.did, payload.collection, payload.rkey)
 
   if (payload.operation === 'delete') {
-    // 删除事件不带 record 且 cid 不可靠，按构造出的 URI 删（幂等）。
-    tx.update(posts).set({ deleted: true }).where(eq(posts.atprotoUri, uri)).run()
+    mirrorDelete(tx, payload.did, payload.rkey)
     return []
   }
 
-  const record = payload.record
-  if (!record || typeof record !== 'object')
-    return []
-  const text = typeof record.text === 'string' ? record.text : ''
-  // `app.bsky.feed.post` 的 text 允许为空串（纯图片帖），而本站不支持图片 ——
-  // 镜像成一张空白卡片比不镜像更糟。
-  if (!text.trim())
-    return []
-
-  if (payload.operation === 'update') {
-    const hit = tx
-      .select({ id: posts.id })
-      .from(posts)
-      .where(eq(posts.atprotoUri, uri))
-      .get()
-    // 命中则只更新正文。**不动 title** —— 那个字段是本站的，不属于这条记录。
-    if (hit) {
-      tx.update(posts).set({ content: text }).where(eq(posts.id, hit.id)).run()
-      return []
-    }
-    // 未命中按 create 处理（下面继续）。
-  }
-
-  const parentUri = readReplyParentUri(record)
-  let parentId: number | null = null
-  if (parentUri !== undefined) {
-    // 是回复，但父帖不在本地 —— 跳过，否则它会错误地冒到题壁流顶层。
-    if (!parentUri)
-      return []
-    const parent = tx
-      .select({ id: posts.id })
-      .from(posts)
-      .where(and(eq(posts.atprotoUri, parentUri), eq(posts.deleted, false)))
-      .get()
-    if (!parent)
-      return []
-    parentId = parent.id
-  }
-
-  // `on conflict do nothing` 是**回环吸收点**：写路径发出去的记录会被 JetStream
-  // 送回来，靠 `posts.atproto_uri` 上的唯一索引在这里被吃掉。
-  const inserted = tx
-    .insert(posts)
-    .values({
-      username,
-      content: text,
-      parentId,
-      createdAt: clampCreatedAt(record.createdAt, payload.time),
-      atprotoUri: uri,
-      atprotoCid: payload.cid ?? null,
-    })
-    .onConflictDoNothing({ target: posts.atprotoUri })
-    .returning({ id: posts.id })
-    .get()
-
-  if (!inserted)
-    return []
-
-  return [{
-    username,
-    postId: inserted.id,
-    uri,
-    cid: payload.cid ?? '',
+  const outcome = mirrorRecord(tx, {
     did: payload.did,
-    handle: identity.handle,
     rkey: payload.rkey,
-    time: payload.time,
-    record,
-  }]
+    cid: payload.cid,
+    record: payload.record,
+    observedAt: payload.time,
+    isUpdate: payload.operation === 'update',
+  })
+  return outcome ? [outcome] : []
 }
 
 /**
@@ -370,21 +249,6 @@ function frameKind(payload: Record<string, unknown>): 'commit' | 'identity' | 'a
   if (payload.account)
     return 'account'
   return undefined
-}
-
-function publishMirrored(outcome: MirrorOutcome): void {
-  // 第一条让 `PostPage.vue` 的 reload() 与粉丝通知自动工作，前端零改动。
-  bus.publish('net.pbhh.post.created', { username: outcome.username, postId: outcome.postId })
-  bus.publish('app.bsky.feed.post', {
-    uri: outcome.uri,
-    cid: outcome.cid,
-    did: outcome.did,
-    handle: outcome.handle,
-    username: outcome.username,
-    rkey: outcome.rkey,
-    time: outcome.time,
-    record: outcome.record,
-  })
 }
 
 let failureSeq: number | undefined

@@ -3,6 +3,7 @@ import { Agent } from '@atproto/api'
 import { Elysia, t } from 'elysia'
 import { requireAuth } from '../auth/guard'
 import { jwtPlugin } from '../jwt'
+import { backfillFromPds } from './backfill'
 import { getOAuthClient, isAtprotoConfigured, revokeSession, sweepExpiredStates } from './client'
 import { HANDLE_DOMAIN, SITE_ORIGIN } from './config'
 import { getJetstreamStatus, scheduleJetstreamReconnect, startJetstream } from './jetstream'
@@ -148,6 +149,12 @@ export default new Elysia()
     // `bus.on('event')` 会把事件投给所有 webhook 与已认证的 WS/SSE 订阅者，等于把
     // 「谁绑定了/谁解绑了」泄露给所有人。
     scheduleJetstreamReconnect()
+
+    // 回填历史帖。**刻意不 await** —— 用户拿到的应该是一张已经跳回去的设置页，
+    // 而不是等 50 条记录写完；失败也只记日志（见 backfill.ts）。不 await 也意味着
+    // 它可能与 JetStream 的实时流抢同一条 URI，靠 `posts.atproto_uri` 的唯一索引
+    // 加 `on conflict do nothing` 吸收。
+    void backfillFromPds(session.did)
 
     return redirect(backToSettings({ atproto: 'bound' }))
   }, {
