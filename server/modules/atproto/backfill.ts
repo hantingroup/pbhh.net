@@ -15,6 +15,13 @@ import { BACKFILL_MAX_PAST_MS, mirrorRecord, POST_COLLECTION, publishMirrored } 
  * **不问 AppView，直接问用户的 PDS**：`com.atproto.repo.listRecords` 是 PDS 方法
  * （实测在 `public.api.bsky.app` 上返回 `MethodNotImplemented`）。用 OAuth 会话构造的
  * `Agent` 会自己路由到用户 PDS，所以这里不需要解析 DID 文档。
+ *
+ * **只拉 `POST_COLLECTION`，所以这里不修复点赞。** 两个调用方都不例外：绑定回填只带
+ * 帖进来，`sync` 重同步复用的也是这个函数。于是站内的赞数必然**长期低于** Bluesky 的
+ * 真实赞数——绑定之前的赞、以及 `CursorTooOld` 复位留下的缺口，都补不回来。要补得另加
+ * 一张 pending 表，或者在这里多拉一次 `app.bsky.feed.like`（并解决「哪些赞属于本站的
+ * 帖」的匹配问题），是另一个量级的改动。这条限制与实时流那半边的说明在
+ * `jetstream.ts` 的 `mirrorLike` 上方。
  */
 
 /** `listRecords` 的 limit 上限是 100；50 是个折中，够让用户看到「我的帖过来了」。 */

@@ -31,6 +31,7 @@ interface AtprotoBinding {
   did: string | null
   handle: string | null
   publishEnabled: boolean
+  syncLikesEnabled: boolean
   domainHandle: string
   handleDomain: string
 }
@@ -43,7 +44,8 @@ const handleError = ref('')
 /** 正在跳去 PDS 授权（顶层跳转，页面会离开，所以这个状态基本只是防重复点击）。 */
 const redirecting = ref(false)
 const unbinding = ref(false)
-const savingPublish = ref(false)
+/** 两个开关共用：它们的失败语义逐字相同，分成两个状态只会有一个忘记复位。 */
+const savingSwitch = ref(false)
 const actionError = ref('')
 const notice = ref('')
 
@@ -162,28 +164,43 @@ async function unbind() {
 }
 
 /**
- * 乐观切换 + 失败回滚。这个开关的后果完全在服务端（决定建帖时要不要入队），所以
- * 不能只改本地状态装装样子 —— 保存失败必须弹回去，否则用户会以为已经关掉了。
+ * 乐观切换 + 失败回滚。两个开关的后果都完全在服务端（一个决定建帖/点赞要不要入队，
+ * 一个决定入站的赞要不要落库），所以不能只改本地状态装装样子 —— 保存失败必须弹回去，
+ * 否则用户会以为已经关掉了。
+ *
+ * 两个开关共用这一个实现。请求体按字段名分岔写成两个字面量，而不是
+ * `{ [field]: enabled }`：计算属性名的类型是 `{[x: string]: boolean}`，与 Eden 推出来的
+ * 请求体对不上，而分成两份近乎逐字相同的函数只会让其中一份漏掉回滚。
  */
-async function setPublish(enabled: boolean) {
+async function saveSwitch(field: 'publishEnabled' | 'syncLikesEnabled', enabled: boolean) {
   if (!binding.value)
     return
-  const previous = binding.value.publishEnabled
-  binding.value.publishEnabled = enabled
-  savingPublish.value = true
+  const previous = binding.value[field]
+  binding.value[field] = enabled
+  savingSwitch.value = true
   actionError.value = ''
   try {
-    const { error } = await api.me.bindings.atproto.patch({ publishEnabled: enabled })
+    const { error } = await (field === 'publishEnabled'
+      ? api.me.bindings.atproto.patch({ publishEnabled: enabled })
+      : api.me.bindings.atproto.patch({ syncLikesEnabled: enabled }))
     if (error)
       throw new Error(String(error))
   }
   catch {
-    binding.value.publishEnabled = previous
+    binding.value[field] = previous
     actionError.value = t('bind.atproto.publishFailed')
   }
   finally {
-    savingPublish.value = false
+    savingSwitch.value = false
   }
+}
+
+function setPublish(enabled: boolean) {
+  return saveSwitch('publishEnabled', enabled)
+}
+
+function setSyncLikes(enabled: boolean) {
+  return saveSwitch('syncLikesEnabled', enabled)
 }
 </script>
 
@@ -245,7 +262,11 @@ async function setPublish(enabled: boolean) {
             {{ t('bind.atproto.syncNote') }}
           </p>
 
-          <!-- 发布开关。默认开；关掉只影响「以后新发的帖」，不入队而已。 -->
+          <!--
+            两个开关方向相反，各管一条管子：出站复用 publishEnabled（题壁 + 点赞），
+            入站是 syncLikesEnabled（只盖点赞，不盖入站帖子 —— 帖子的镜像至今没有
+            开关）。文案必须把这个不对称写清楚，否则用户会以为关掉它能停掉整条读路径。
+          -->
           <div class="flex items-center justify-between gap-4 border-t pt-4">
             <div>
               <p class="text-sm font-medium">
@@ -257,8 +278,24 @@ async function setPublish(enabled: boolean) {
             </div>
             <Switch
               :model-value="binding.publishEnabled"
-              :disabled="savingPublish"
+              :disabled="savingSwitch"
               @update:model-value="setPublish"
+            />
+          </div>
+
+          <div class="flex items-center justify-between gap-4 border-t pt-4">
+            <div>
+              <p class="text-sm font-medium">
+                {{ t('bind.atproto.syncLikesLabel') }}
+              </p>
+              <p class="text-xs text-muted-foreground">
+                {{ t('bind.atproto.syncLikesHint') }}
+              </p>
+            </div>
+            <Switch
+              :model-value="binding.syncLikesEnabled"
+              :disabled="savingSwitch"
+              @update:model-value="setSyncLikes"
             />
           </div>
 

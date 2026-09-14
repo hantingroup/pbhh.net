@@ -31,7 +31,13 @@ export interface AppEventMap {
   // `app.bsky.feed.post` 是对方 repo 里的 collection NSID，原样使用。删除在
   // JetStream 里是同一个 collection 上的一次 `operation=delete`，没有独立
   // NSID，这里按站内约定补 `.deleted` 后缀，好让 `app.bsky.feed.post.*` 通配
-  // 一次订阅一拍。`like`/`follow` 暂不订阅（见 jetstream.ts），订阅时再补类型。
+  // 一次订阅一拍。
+  //
+  // **`app.bsky.feed.like` 刻意没有对应的话题**，虽然读路径确实订了它
+  // （`jetstream.ts`）。入站的赞在本地落成的是**本站自己的**一行 `post_likes`，
+  // 对它有意义的问题与本站点的赞完全相同 ——「谁赞了哪条帖」—— 所以直接复用下面
+  // 已有的 `net.pbhh.post.liked`，而不是再开一个 atproto 形状的话题让订阅方去
+  // 自己映射。`follow` / `repost` 仍然完全不订阅。
   'app.bsky.feed.post': {
     /** at://did:plc:xxx/app.bsky.feed.post/<rkey> */
     uri: string

@@ -181,17 +181,44 @@ export default new Elysia()
       handle: identity?.handle ?? null,
       // 没绑定时也给 true（schema 默认值），前端只在绑定分支里读它。
       publishEnabled: identity?.publishEnabled ?? true,
+      // 入站方向**只盖住点赞**，不盖住入站帖子 —— 帖子的镜像至今没有开关。设置页的
+      // 文案必须把这个不对称写清楚，否则用户会以为关掉它能停掉整条读路径。
+      syncLikesEnabled: identity?.syncLikesEnabled ?? true,
       // 子域标签就是用户名（降为小写），注册时就定了，没有单独的认领步骤。
       domainHandle: `${username.toLowerCase()}.${HANDLE_DOMAIN}`,
       handleDomain: HANDLE_DOMAIN,
     }
   })
+  /**
+   * 两个开关**都是可选的，各自「给了才写」**。
+   *
+   * `publishEnabled` 曾经是必填的，再加一个必填字段会让现有前端调用当场 400 —— 而
+   * 「没给」的语义是「这个调用方不关心它」，不是「把它设成 false」。所以判空必须写在
+   * 写入之前，且不能拿某个默认值去补。
+   */
   .patch('/me/bindings/atproto', ({ body, username, status }) => {
-    if (!AtprotoService.setPublishEnabled(username, body.publishEnabled))
+    if (body.publishEnabled !== undefined) {
+      if (!AtprotoService.setPublishEnabled(username, body.publishEnabled))
+        return status(404, { message: 'atproto.notBound' })
+    }
+    if (body.syncLikesEnabled !== undefined) {
+      if (!AtprotoService.setSyncLikesEnabled(username, body.syncLikesEnabled))
+        return status(404, { message: 'atproto.notBound' })
+    }
+    // 回写后的实际状态。两个字段都没给时这是一次无操作的 200，也顺带覆盖了「没绑定」
+    // 那条分支（上面两个 `if` 都不会触发）。
+    const identity = AtprotoService.getIdentity(username)
+    if (!identity)
       return status(404, { message: 'atproto.notBound' })
-    return { publishEnabled: body.publishEnabled }
+    return {
+      publishEnabled: identity.publishEnabled,
+      syncLikesEnabled: identity.syncLikesEnabled,
+    }
   }, {
-    body: t.Object({ publishEnabled: t.Boolean() }),
+    body: t.Object({
+      publishEnabled: t.Optional(t.Boolean()),
+      syncLikesEnabled: t.Optional(t.Boolean()),
+    }),
   })
   .delete('/me/bindings/atproto', async ({ username, status }) => {
     const did = AtprotoService.unbindIdentity(username)

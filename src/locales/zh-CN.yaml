@@ -229,9 +229,11 @@ bind:
     currentDid: DID：
     intro: 填入你已有的 atproto handle（例如 alice.bsky.social），授权通过后就能把 <username>.pbhh.net 设成主页地址。
     syncNote: 绑定后你在 Bluesky 新发的帖子会同步到这里的题壁，最近 50 条历史帖也会一并回填。
-    replyNote: 但别人在你的帖子下留的回复不会同步过来，别人对你帖子的赞也一样。
+    replyNote: 但别人在你的帖子下留的回复不会同步过来，别人对你帖子的赞也一样 —— 能同步的只有你自己在 Bluesky 上的活动。
     publishLabel: 把这里的题壁和点赞同步发到 Bluesky
     publishHint: 关掉后新发的题壁和新的点赞不再发过去，已经发出去的不受影响。取消赞仍然会收回 Bluesky 上对应的那条记录。
+    syncLikesLabel: 把我在 Bluesky 点的赞同步进来
+    syncLikesHint: 只管点赞：关掉后你在 Bluesky 上点的赞不再同步过来（已经同步过来的不受影响）。从 Bluesky 镜像过来的帖子与它无关。
     publishFailed: 开关没能保存，请稍后再试
     unbindKeepsPosts: 解绑不会删除你在 Bluesky 上已经发布的帖子。
     handleLabel: atproto handle

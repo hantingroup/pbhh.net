@@ -488,6 +488,45 @@ export function mirrorLocalLike(input: {
   })
 }
 
+/**
+ * 把一条**已经不再代表用户意图**的旧 like 记录收回来。由读路径的认领规则调用
+ * （见 `jetstream.ts` 的 `mirrorLike`），**必须在调用方的事务里执行** —— 它和「把
+ * `post_likes.atproto_uri` 改指到新记录」是同一个决定的两半，分两个事务崩在中间会
+ * 留下「行指向旧记录、而旧记录已经被删」这种更糟的状态。
+ *
+ * 旧 uri `U` 可能**还在队列里**（这次 put 还没轮到），也可能**已经投递成功**
+ * （AppView 还没索引到，用户在客户端就又点了一次，于是产生了第二条记录）。这里
+ * **不需要分辨**，两步各自幂等：
+ *
+ * - 删掉 `U` 挂起的 `put-like`：还没发就别发了。
+ * - 给 `U` 入一条 `delete-like`：发过就收回；没发过则 `RecordNotFound` → 幂等成功
+ *   （见 `deliverLike` 的 delete 分支）。
+ *
+ * `did` 用**当前绑定**的那个，与 `enqueueDeletes` 同一个理由（见那里的注释）。
+ */
+export function retractStaleLike(tx: Tx, input: {
+  did: string
+  username: string
+  uri: string
+}): void {
+  // **`kind` 非带不可**：唯一索引是 `(uri, kind)`，`uri` 单独并不唯一 —— 按 uri 裸删
+  // 会把同一地址上待发的 put 一起删掉（而那条 put 可能是我们真正想发出去的）。
+  tx.delete(atprotoOutbox)
+    .where(and(eq(atprotoOutbox.uri, input.uri), eq(atprotoOutbox.kind, 'put-like')))
+    .run()
+  tx.insert(atprotoOutbox)
+    .values({
+      did: input.did,
+      username: input.username,
+      kind: 'delete-like',
+      rkey: input.uri.slice(input.uri.lastIndexOf('/') + 1),
+      uri: input.uri,
+      record: null,
+    })
+    .onConflictDoNothing({ target: [atprotoOutbox.uri, atprotoOutbox.kind] })
+    .run()
+}
+
 // ─── 投递 ─────────────────────────────────────────────────────────────────────
 
 type OutboxRow = typeof atprotoOutbox.$inferSelect

@@ -243,12 +243,17 @@ bind:
       with your 50 most recent existing posts.
     replyNote: >-
       Replies other people leave on your posts are not synced, and neither are
-      their likes.
+      their likes — only your own activity on Bluesky comes across.
     publishLabel: Publish my posts and likes here to Bluesky
     publishHint: >-
       When off, new posts and new likes stop going to Bluesky. Things already
       published are not affected. Unliking still retracts the matching record
       on Bluesky.
+    syncLikesLabel: Sync the likes I make on Bluesky
+    syncLikesHint: >-
+      Covers likes only — when off, likes you make on Bluesky stop coming here
+      (ones already synced are unaffected). Posts mirrored from Bluesky are
+      not affected by this switch.
     publishFailed: The setting could not be saved. Please try again later.
     unbindKeepsPosts: >-
       Unlinking does not delete posts you have already published to Bluesky.

@@ -1,12 +1,20 @@
 import type { MirrorOutcome, Tx } from './mirror'
-import { eq } from 'drizzle-orm'
-import { atprotoCursor, db } from 'server/database'
+import { and, eq } from 'drizzle-orm'
+import { atprotoCursor, db, postLikes, posts } from 'server/database'
+import { bus } from '../events/bus'
 import { backfillFromPds } from './backfill'
-import { mirrorDelete, mirrorRecord, POST_COLLECTION, publishMirrored } from './mirror'
+import { atUri, LIKE_COLLECTION, mirrorDelete, mirrorRecord, POST_COLLECTION, publishMirrored } from './mirror'
+import { retractStaleLike } from './outbox'
 import * as AtprotoService from './service'
 
 /**
- * 读路径：消费 JetStream，把用户发在 Bluesky 的帖子镜像进本站 `posts` 表。
+ * 读路径：消费 JetStream，把用户发在 Bluesky 的帖子镜像进本站 `posts` 表、把用户点的
+ * 赞镜像进 `post_likes`。
+ *
+ * **两件事的可达性是同一堵墙决定的**：`dids` 按**事件来源 repo** 过滤，所以我们只看得
+ * 到绑定用户自己 repo 里的东西。用户自己的帖 ✅、用户自己的赞 ✅（like 记录住在点赞者
+ * 的 repo 里）；**别人**对我们用户帖子的赞 ❌、别人的回复 ❌。后两者要另想办法，不在
+ * 这个模块的射程内。
  *
  * 手写而不是引 `@bsky/jetstream`：那个包声明 `engines: node >=22.15.0`、依赖 `ws`，
  * 而本服务是**单个 Bun 进程** —— 为一个 socket 引入第二个 Node 进程是重大运维改动。
@@ -23,7 +31,13 @@ import * as AtprotoService from './service'
 
 const JETSTREAM_ORIGIN = 'wss://jetstream.us-east.bsky.network'
 const SUBSCRIBE_PATH = '/xrpc/network.bsky.jetstream.subscribeEvents'
-const WANTED_COLLECTIONS = [POST_COLLECTION]
+/**
+ * 两种 collection。**like 也能订到，是 `dids` 过滤方式的直接结果**：JetStream 按**事件来源
+ * repo** 过滤，而一条 like 记录住在**点赞的人**的 repo 里 —— 所以绑定用户在 Bluesky
+ * 上的赞拿得到，陌生人对我们用户帖子的赞拿不到（那是另一堵墙，与「别人的回复」
+ * 同一堵，本轮不动）。见 `mirrorLike`。
+ */
+const WANTED_COLLECTIONS = [POST_COLLECTION, LIKE_COLLECTION]
 /**
  * `identity` 是免费的：`collections` 只约束 commit 事件，它会照常流过。
  *
@@ -185,9 +199,14 @@ function resetCursor(floor: number): void {
 // ─── 镜像规则 ─────────────────────────────────────────────────────────────────
 
 /**
- * 规则本身住在 `mirror.ts`（回填与实时流共用同一份，见那里的说明）。这里只做
- * 「commit 事件 → 记录」的翻译：delete 走软删，update 带 `isUpdate` 标记，其余
+ * 帖的镜像。规则本身住在 `mirror.ts`（回填与实时流共用同一份，见那里的说明）。这里
+ * 只做「commit 事件 → 记录」的翻译：delete 走软删，update 带 `isUpdate` 标记，其余
  * 一律按 create。
+ *
+ * **只管 `app.bsky.feed.post`，按 collection 的分派在 `handleFrame` 里做**（like 走
+ * `mirrorLike`，它不落 `posts`）。这里的闸门是它自己的契约，不是防御性代码：
+ * `mirrorRecord` 对一条 like 记录会造出一张空白卡片 —— 它把非空的 `record.text` 当作
+ * 唯一门槛，而 like 没有 `text`，结果是一条内容为空的帖被插进题壁流。
  */
 function mirrorCommit(tx: Tx, payload: CommitPayload): MirrorOutcome[] {
   if (payload.collection !== POST_COLLECTION)
@@ -207,6 +226,160 @@ function mirrorCommit(tx: Tx, payload: CommitPayload): MirrorOutcome[] {
     isUpdate: payload.operation === 'update',
   })
   return outcome ? [outcome] : []
+}
+
+/**
+ * 入站的赞要补发的事件。与 `MirrorOutcome` **分开表达**是因为处置完全不同：
+ * `publishMirrored` 会按**帖**的形状发一个 `app.bsky.feed.post` 公共事件，一个 like
+ * 的 outcome 混进那个数组就会发出结构错误的帧。赞补发的是本站自己的
+ * `net.pbhh.post.liked` —— 与用户在本站点赞时**逐字同一个话题、同一个 payload 形状**，
+ * 所以通知链路（`notification/service.ts` 的 `onPostLiked`）一行都不用改。
+ */
+interface LikeOutcome {
+  postId: number
+  actorUsername: string
+  liked: boolean
+}
+
+/**
+ * `record.subject.uri`。形状不对一律返回 `null`，**调用方必须静默跳过**。
+ *
+ * 为什么不能直接写 `record.subject.uri`：那条路径上抛出的 TypeError 会一路走到
+ * `handleFrame` 的 catch，而那里的处置是**断开 socket + 从游标重放整条事件** —— 别人
+ * 写的一条畸形记录就能让整条读路径抖动。更糟的是 `console.error(..., err)` 会把异常
+ * 文本落盘，而异常文本里可能带着那个 subject uri，正好违反下面的隐私规则。
+ */
+function readLikeSubjectUri(record: Record<string, unknown>): string | null {
+  const subject = record.subject
+  if (typeof subject !== 'object' || subject === null)
+    return null
+  const uri = (subject as { uri?: unknown }).uri
+  return typeof uri === 'string' && uri ? uri : null
+}
+
+/**
+ * 入站的赞（`app.bsky.feed.like`）。**必须是个不抛异常的 total 函数**，原因同
+ * `readLikeSubjectUri`：抛出去 = 断连重放 + 异常文本落盘。
+ *
+ * 「按规则跳过」与「SQL 失败」两类必须分开对待：
+ * - **形状不合法 / subject 不在本地 / did 不是我们的绑定用户 → 静默返回**，不写任何
+ *   日志、不抛异常。我们会收到绑定用户的**全部**点赞活动，其中绝大多数与 pbhh.net
+ *   毫无关系，它们不许留下任何痕迹。
+ * - **SQL 执行失败照常抛**（insert 撞 FK、列不存在、唯一索引冲突）。那是我们的 bug，
+ *   不是对方的隐私；为了「不记日志」把它吞成 `return undefined` 等于把真 bug 变成
+ *   静默丢数据。
+ *
+ * **这一轮明确不做回填**：绑定之前的赞一条都进不来，`sync` 触发的重同步复用
+ * `backfillFromPds`（只拉 `POST_COLLECTION`），同样不修 like。所以站内的赞数必然长期
+ * 低于 Bluesky 的真实赞数。要修得加一张 pending 表或给绑定流程加一次
+ * `listRecords(collection=app.bsky.feed.like)`，是另一个量级的改动。
+ */
+function mirrorLike(tx: Tx, payload: CommitPayload): LikeOutcome | undefined {
+  const identity = AtprotoService.getIdentityByDid(payload.did)
+  if (!identity)
+    return undefined
+
+  // 事件自己的地址。取消赞的 commit 事件**不带 `record`**（见 `CommitPayload.cid`
+  // 上面的注释），所以读不到 `subject` —— 只能靠这个地址反查这是哪一行。这就是
+  // `post_likes.atproto_uri` 非有不可的原因。
+  const incoming = atUri(payload.did, LIKE_COLLECTION, payload.rkey)
+
+  if (payload.operation === 'delete') {
+    // **取消不受 `syncLikesEnabled` 约束**，与出站侧「`publishEnabled` 不闸撤回」
+    // 逐字同理（见 `mirrorLocalLike`）：开关管的是要不要把**新的**赞拉进来，而一条
+    // 已经拉进来的赞在 Bluesky 上被取消之后，留在本站就是一句永远无法自愈的假话。
+    //
+    // **这里也不能带 `deleted = false` 那个条件** —— 那是 create 侧的闸门（帖子已被
+    // 删掉就不该再新增赞），套到这里会让旧行永远删不掉。
+    const hit = tx
+      .select({ postId: postLikes.postId, username: postLikes.username })
+      .from(postLikes)
+      .where(eq(postLikes.atprotoUri, incoming))
+      .get()
+    if (!hit)
+      return undefined
+    // 按主键删，不按 uri：`atproto_uri` 只是「最近观测到的地址」，主键才是身份。
+    tx.delete(postLikes)
+      .where(and(eq(postLikes.postId, hit.postId), eq(postLikes.username, hit.username)))
+      .run()
+    // `liked: false` **也必须产出**，否则 `onPostLiked` 的撤销分支永远不会被入站触发，
+    // 那条通知会一直留在收件箱里。
+    return { postId: hit.postId, actorUsername: hit.username, liked: false }
+  }
+
+  // create 与 update 走同一条路径。**update 必须和 create 一样处理**：我们自己
+  // `putRecord` 覆盖同 rkey 时发出的**就是** update（今天不会发生，但 `Republish` 之类
+  // 的操作会），不一起处理就会让自己发出去的记录漏掉一类。like 没有可更新的内容，
+  // 语义上 update ≡ create。
+  if (!identity.syncLikesEnabled)
+    return undefined
+
+  const record = payload.record
+  if (!record || typeof record !== 'object')
+    return undefined
+  const subjectUri = readLikeSubjectUri(record)
+  if (!subjectUri)
+    return undefined
+
+  const post = tx
+    .select({ id: posts.id })
+    .from(posts)
+    .where(and(eq(posts.atprotoUri, subjectUri), eq(posts.deleted, false)))
+    .get()
+  // **绝大多数事件走到这里就结束了**（赞的是一条与 pbhh.net 无关的帖）。静默。
+  if (!post)
+    return undefined
+
+  const existing = tx
+    .select({ atprotoUri: postLikes.atprotoUri })
+    .from(postLikes)
+    .where(and(eq(postLikes.postId, post.id), eq(postLikes.username, identity.username)))
+    .get()
+
+  if (!existing) {
+    tx.insert(postLikes)
+      .values({ postId: post.id, username: identity.username, atprotoUri: incoming })
+      .run()
+    return { postId: post.id, actorUsername: identity.username, liked: true }
+  }
+
+  // 已存在且地址相同 = **回环吸收点**：我们自己发出去的那条赞被 JetStream 送了回来。
+  // 无操作、无 outcome ⇒ 不发通知，用户在本地看到的状态一个字都没变。
+  if (existing.atprotoUri === incoming)
+    return undefined
+
+  // ── 认领 ───────────────────────────────────────────────────────────────────
+  // 本地这一行的 `atproto_uri` 不等于刚观测到的地址：为 NULL（未绑定或关掉开关时点
+  // 的赞），或者是一个别的地址（见下面的场景）。`atproto_uri` 的含义是「这条赞目前
+  // 对应的、**最近观测到的真实记录地址**」，不是「我们发出去的那条」—— 这个语义是
+  // 必需的，因为**客户端只会删掉它自己知道的那条记录**，我们存错一条就等于用户的取消
+  // 永远落不了地。
+  //
+  // 最隐蔽的那个场景（比 NULL 更常见）：
+  //   1. 用户在本站点赞 → 行指向 `U`，put 投递成功，但 **AppView 还没索引到 `U`**，
+  //      官方客户端因此显示「未赞」；
+  //   2. 用户手快，在客户端又点了一下 → repo 里产生**第二条**记录 `R2`；
+  //   3. 这条 `R2` 的 create 事件到达。若「不认领」，行仍指向 `U`；
+  //   4. 用户在客户端取消 → 客户端删的是它知道的 `R2` → 入站 delete 按 `R2` 查不到
+  //      → **本地仍显示已赞**，而用户的取消在两边都没生效。
+  //
+  // 所以：**无条件认领**，并把旧地址收敛掉。收敛不需要知道 `U` 到底投递成功没有 ——
+  // 两步各自幂等，见 `retractStaleLike`。
+  tx.update(postLikes)
+    .set({ atprotoUri: incoming })
+    .where(and(eq(postLikes.postId, post.id), eq(postLikes.username, identity.username)))
+    .run()
+  if (existing.atprotoUri) {
+    retractStaleLike(tx, {
+      did: identity.did,
+      username: identity.username,
+      uri: existing.atprotoUri,
+    })
+  }
+  // **刻意不产出 outcome**：本地这一行本来就在，用户看到的状态没变。产出会经
+  // `onPostLiked` 的 `liked: true` 分支**再插一条通知**（那个 insert 没有去重，每次
+  // 都插），于是「在客户端重复点一下」就等于给作者多发一条通知。
+  return undefined
 }
 
 /**
@@ -386,13 +559,29 @@ export function handleFrame(raw: string): void {
 
   lastEventAt = Date.now()
   const outcomes: MirrorOutcome[] = []
+  /**
+   * 赞的结果**并列一个数组**，绝不混进 `outcomes` —— `publishMirrored` 会按帖的形状
+   * 发 `app.bsky.feed.post`。两者在同一个提交后循环里发布。
+   */
+  const likes: LikeOutcome[] = []
   /** 事务提交之后才入队，与 `outcomes` 同一个道理：回滚了就不该留下副作用。 */
   const syncs: string[] = []
 
   try {
     db.transaction((tx) => {
       if (kind === 'commit') {
-        outcomes.push(...mirrorCommit(tx, payload as unknown as CommitPayload))
+        // **按 collection 分派**。改之前这里是一条「非 post 一律静默丢弃」的闸门 ——
+        // 也就是说 like 事件一直在流进来、一直被吞掉，站点上没有任何痕迹说明这件事
+        // 发生过。现在两条路各自有名字。
+        const commit = payload as unknown as CommitPayload
+        if (commit.collection === LIKE_COLLECTION) {
+          const like = mirrorLike(tx, commit)
+          if (like)
+            likes.push(like)
+        }
+        else {
+          outcomes.push(...mirrorCommit(tx, commit))
+        }
       }
       else if (kind === 'identity') {
         applyIdentity(payload as unknown as IdentityPayload)
@@ -448,6 +637,18 @@ export function handleFrame(raw: string): void {
 
   for (const outcome of outcomes)
     publishMirrored(outcome)
+
+  // 与本站点一次赞**逐字同一个话题、同一个 payload 形状**，所以通知链路零改动。
+  //
+  // **payload 里永远不加 did / at-uri**：这个话题在 `PUBLIC_TOPICS` 里，匿名 SSE 与
+  // 所有注册的第三方 webhook 都收得到。
+  for (const like of likes) {
+    bus.publish('net.pbhh.post.liked', {
+      postId: like.postId,
+      actorUsername: like.actorUsername,
+      liked: like.liked,
+    })
+  }
 
   // 事务已提交。`sync` 是「我们可能已经漏了帖」的唯一信号，所以即使没绑定的 DID
   // 被 queueResync 丢掉，也要留下一条日志 —— 这个事件本身的出现就值得知道。

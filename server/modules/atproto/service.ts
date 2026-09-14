@@ -8,6 +8,11 @@ export interface AtprotoIdentity {
   handle: string
   pdsUrl: string
   publishEnabled: boolean
+  /**
+   * 是否把用户**在 Bluesky 上点的赞**同步进来。**刻意不覆盖入站帖子** —— 帖子的镜像
+   * 至今没有开关（见 schema 里的同名注释）。读路径 `jetstream.ts` 只该用它闸住 like。
+   */
+  syncLikesEnabled: boolean
 }
 
 export function getIdentity(username: string): AtprotoIdentity | undefined {
@@ -104,6 +109,22 @@ export function unbindIdentity(username: string): string | undefined {
 export function setPublishEnabled(username: string, publishEnabled: boolean): boolean {
   const row = db.update(atprotoIdentities)
     .set({ publishEnabled })
+    .where(eq(atprotoIdentities.username, username))
+    .returning({ username: atprotoIdentities.username })
+    .get()
+  return !!row
+}
+
+/**
+ * 设置页的「把我在 Bluesky 点的赞同步进来」开关。返回 false = 这个用户没绑定。
+ *
+ * 与 `setPublishEnabled` 分成两个函数而不是合成一个 `updateSettings`：两个开关方向
+ * 相反（一个出站一个新入站），调用点也分属两个路由字段，合起来只会让「哪些字段是
+ * 可选的、缺省时保持原值」这层逻辑散在参数默认值里。
+ */
+export function setSyncLikesEnabled(username: string, syncLikesEnabled: boolean): boolean {
+  const row = db.update(atprotoIdentities)
+    .set({ syncLikesEnabled })
     .where(eq(atprotoIdentities.username, username))
     .returning({ username: atprotoIdentities.username })
     .get()
