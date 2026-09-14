@@ -199,6 +199,12 @@ export function mirrorRecord(tx: Tx, input: RecordInput): MirrorOutcome | undefi
   // `on conflict do nothing` 是**回环吸收点**：写路径发出去的记录会被 JetStream
   // 送回来，靠 `posts.atproto_uri` 上的唯一索引在这里被吃掉。回填与实时流抢同一条
   // URI 时也走这里。
+  //
+  // `atprotoMirrored: true` 只在 **insert** 分支出现，这是有意的：回环走的是
+  // `onConflictDoNothing`（连 update 都不进），而 `mirrorRecord` 的 update 分支处理的
+  // 是**已经存在的镜像帖**被编辑 —— 两条路上这条帖都是镜像来的，但 update 分支不能碰
+  // 这个标志，因为我们自己发出去的帖回环回来时也可能落进那条分支（那时它的
+  // `atproto_mirrored` 已经是 false，改掉就把自己的原创帖标成「来自 Bluesky」了）。
   const inserted = tx
     .insert(posts)
     .values({
@@ -208,6 +214,7 @@ export function mirrorRecord(tx: Tx, input: RecordInput): MirrorOutcome | undefi
       createdAt,
       atprotoUri: uri,
       atprotoCid: input.cid ?? null,
+      atprotoMirrored: true,
     })
     .onConflictDoNothing({ target: posts.atprotoUri })
     .returning({ id: posts.id })

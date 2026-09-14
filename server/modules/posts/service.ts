@@ -17,6 +17,8 @@ function query(where?: SQL, order: 'asc' | 'desc' = 'desc') {
       avatar: users.avatar,
       createdAt: posts.createdAt,
       atprotoUri: posts.atprotoUri,
+      // 判来源靠这一列，不能靠 `atprotoUri` 的形态 —— 两个方向的 rkey 都是 TID。
+      atprotoMirrored: posts.atprotoMirrored,
       likeCount: count(postLikes.username),
       replyCount: sql`(
         WITH RECURSIVE tree(id) AS (
@@ -62,8 +64,8 @@ function toItem(row: Row, likedIds: Set<number>) {
     /**
      * 这条帖是不是从 Bluesky 镜像来的，以及它的原帖地址。
      *
-     * 判断放在服务端而不是把 `atprotoUri` 直接丢给前端：`pbhh-<id>` 是服务端的不变量，
-     * 让客户端去比字符串等于把这个约定复制到第二个地方。
+     * 判断放在服务端而不是把 `atprotoUri` 直接丢给前端：`pbhh-<id>` 那个约定、以及
+     * 「哪一列才是判据」，让客户端去比字符串等于把服务端的不变量复制到第二个地方。
      *
      * `bskyUrl` 只有镜像帖才有 —— 本站发出去的帖虽然有 URI，但那是这里的内容，
      * 给一个「去 Bluesky 看」的链接只是把人绕一圈。

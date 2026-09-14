@@ -1,10 +1,8 @@
 import type { Tx } from './mirror'
 import { Agent, RichText, XRPCError } from '@atproto/api'
+import { TID } from '@atproto/common-web'
 import { and, asc, count, eq, inArray, lte } from 'drizzle-orm'
 import { atprotoOutbox, db, postLikes, posts } from 'server/database'
-// rkey 的格式与「哪条帖是镜像来的」是同一个约定，两个方向共用一份定义。
-// 放在 `posts/rkey.ts` 而不是这里，因为 `posts/service.ts` 不能 import atproto。
-import { localRkey } from '../posts/rkey'
 import { getOAuthClient } from './client'
 import { atUri, LIKE_COLLECTION, POST_COLLECTION } from './mirror'
 import * as AtprotoService from './service'
@@ -22,9 +20,13 @@ import * as AtprotoService from './service'
  *    回环回来时找不到本地行，会凭空多出一条镜像帖。
  * 3. **超长不截断，宁可不发**。本站正文允许 1000 字，Bluesky 的 `text` 上限是 300
  *    字素。截断意味着用户的公开身份上出现半句话，比发不出去糟得多。
- * 4. **确定性 rkey**：`pbhh-<本地 id>`。URI 在建帖那一刻就可计算，`putRecord` 对同
- *    rkey 是覆盖语义因而重试天然幂等，回环也才能被第 2 条吸收。赞同理，用
- *    `pbhh-like-<本地 id>`。
+ * 4. **rkey 是自己生成的一个 TID**，入队时生成、随行落库（`newRecordKey`）。URI 因而
+ *    在建帖那一刻就确定，`putRecord` 对同 rkey 是覆盖语义、重试天然幂等，回环也才能被
+ *    第 2 条吸收。**唯独不能做成「确定性」的 `pbhh-<本地 id>`**：`app.bsky.feed.post` 与
+ *    `app.bsky.feed.like` 的 lexicon 都声明 `"key": "tid"`（拉官方 lexicon 文件可确认），
+ *    PDS 按声明校验，非 TID 一律回 `Invalid record key for <collection>: Invalid TID
+ *    string` —— 于是**整条出站半边在投递时刻才失败**，而 scope 那个 bug 也是同一副面孔
+ *    （见 `client.ts` 的 SCOPE 注释），两件事叠在一起时会互相掩盖，实测花掉一整天。
  * 5. **引用别人记录时，锚点在发送时刻算，不在入队时刻算**。回复的 `reply.parent` 与
  *    点赞的 `subject` 都是 strongRef，而目标帖的 `atproto_cid` 要等它自己的 put 投递
  *    成功才有（`succeed` 才写）—— 也就是**建帖后那 3 秒内谁都锚不住它**。入队时就
@@ -35,8 +37,10 @@ import * as AtprotoService from './service'
  * **完全不 import atproto**，无环。这里也不 import `posts/service` —— 需要的字段
  * （`atproto_uri` / `atproto_cid` / `parentId`）`toItem` 都不给，直接查表更短。
  *
- * 唯一的例外是 `posts/rkey.ts`：它自己不 import 任何东西，且 rkey 的格式是读写两侧
- * 共用的约定（写侧生成、读侧用来判断来源），必须只有一份定义。它不牵出依赖图。
+ * 这个模块**不 import `posts/rkey.ts`**。那里的 `localRkey` 曾是这里生成 rkey 的依据，
+ * 现在只剩一个用途：让 `isMirroredPost` 认出 `posts.atproto_mirrored` 引入之前写的旧行。
+ * 那纯属**读**侧的活；生成在写侧，解释在读侧，两边不再共用一份定义 —— 它们已经不是
+ * 同一个东西了（详见第 4 条与 `schema.ts` 里 `atprotoMirrored` 的注释）。
  */
 
 /** `app.bsky.feed.post` 的 `text` 上限（lexicon：maxGraphemes 300）。 */
@@ -59,9 +63,21 @@ const MAX_GRAPHEMES = 300
  */
 type OutboxKind = 'put' | 'delete' | 'put-like' | 'delete-like'
 
-/** 本站发出的赞用确定性 rkey：`pbhh-like-<posts.id>`。见模块说明第 4 条与不变量 L。 */
-function localLikeRkey(postId: number): string {
-  return `pbhh-like-${postId}`
+/**
+ * 生成本站要写的记录的 rkey。见模块说明第 4 条。
+ *
+ * **必须在入队时生成一次、随行落库**，不能在每次投递尝试时现生成：`putRecord` 的幂等
+ * 性来自「同一个 rkey 覆盖」，每次换一个 rkey 就会在用户 repo 里造出多条记录，而本地
+ * 只有一行 —— 那是永久发散。放在这里而不是 `posts/rkey.ts`，因为那是个零 import 的
+ * 叶子模块，而生成需要一个依赖（见下）。
+ *
+ * 用库的实现而不是自己拼 13 位 base32：TID 的位域是「53 位微秒 + 10 位 clock id +
+ * 12 位计数器」，`TID.next()` 内部的单调计数器还保证同一进程内连续调用不重复。自己拼
+ * 很容易造出**看起来像 TID 但不合法**的串，而那种错误只会在投递时刻由 PDS 报出来。
+ * `@atproto/common-web` 是显式依赖（`@atproto/api` 也依赖它，版本对齐，不会装出两份）。
+ */
+function newRecordKey(): string {
+  return TID.nextStr()
 }
 
 /** 一次 tick 最多处理多少行。单行是一次网络往返，串行发送。 */
@@ -317,11 +333,13 @@ export function mirrorLocalPost(input: { username: string, postId: number }): vo
     }
   }
 
-  const rkey = localRkey(post.id)
+  const rkey = newRecordKey()
   const uri = atUri(identity.did, POST_COLLECTION, rkey)
 
   db.transaction((tx) => {
-    tx.update(posts).set({ atprotoUri: uri }).where(eq(posts.id, post.id)).run()
+    // `atprotoMirrored: false` 必须和 `atprotoUri` 同一次写：`atprotoUri` 一非空，
+    // 这条帖就可能被读侧当成镜像帖（旧判据），而它明明是用户在这里写的原创内容。
+    tx.update(posts).set({ atprotoUri: uri, atprotoMirrored: false }).where(eq(posts.id, post.id)).run()
     tx.insert(atprotoOutbox)
       .values({
         did: identity.did,
@@ -383,8 +401,8 @@ export function enqueueDeletes(username: string, rows: OutboundDelete[]): void {
  * 3. `liked === true` 再依次三道闸，见下。
  *
  * `retractUri` 由 `toggleLike` 交出 —— 它删掉的那一行上的 `atproto_uri`。所以
- * 「在 Bluesky 官方客户端点的赞、回本站取消」也能撤回：那时 rkey 是 TID，不是
- * `pbhh-like-`。
+ * 「在 Bluesky 官方客户端点的赞、回本站取消」也能撤回。**撤回目标只能靠这一列拿到，
+ * 不能靠 rkey 的形态去猜**：客户端那条和我们自己发的那条，rkey 都是 TID。
  */
 export function mirrorLocalLike(input: {
   username: string
@@ -435,7 +453,7 @@ export function mirrorLocalLike(input: {
   if (!like)
     return
   // **幂等，也是防重复记录**：用户在 Bluesky 刚赞了、回环还没到，此时在本站也点一下，
-  // 没有这道闸就会在他 repo 里造出**第二条** like 记录（TID 那条 + `pbhh-like-N`），
+  // 没有这道闸就会在他 repo 里造出**第二条** like 记录（他客户端那条 + 我们这条），
   // 而本地只有一行。
   if (like.atprotoUri)
     return
@@ -450,7 +468,7 @@ export function mirrorLocalLike(input: {
   if (!post?.atprotoUri)
     return
 
-  const rkey = localLikeRkey(input.postId)
+  const rkey = newRecordKey()
   const uri = atUri(identity.did, LIKE_COLLECTION, rkey)
 
   db.transaction((tx: Tx) => {

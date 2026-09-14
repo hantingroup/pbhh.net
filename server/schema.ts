@@ -37,12 +37,13 @@ export const posts = sqliteTable('posts', {
   createdAt: integer('created_at', { mode: 'timestamp' }).notNull().$defaultFn(() => new Date()),
   deleted: integer('deleted', { mode: 'boolean' }).notNull().default(false),
   /**
-   * 对应 atproto 记录地址。本站发布的是 `at://<did>/app.bsky.feed.post/pbhh-<id>`
-   * （rkey 故意做成确定性的，见 `modules/atproto/outbox.ts`）；从 Bluesky 镜像来的
-   * 则是原记录的 `at://` 地址（rkey 是 TID）。
+   * 对应 atproto 记录地址。本站发布的是自己的 repo 里那条（rkey 是**我们生成并存下来
+   * 的 TID**，见 `modules/atproto/outbox.ts`）；从 Bluesky 镜像来的则是原记录的 `at://`
+   * 地址。两边都是 TID，所以这一列**分不出**帖是从哪来的 —— 那是下面 `atprotoMirrored`
+   * 的活。
    *
    * 它同时是回环吸收点：写路径发出去的记录会被 JetStream 送回读路径，靠这一列上的
-   * 唯一索引 + `on conflict do nothing` 吃掉。
+   * 唯一索引 + `on conflict do nothing` 吃掉。吸收**必须按这一列**做，不能按 rkey。
    */
   atprotoUri: text('atproto_uri'),
   /**
@@ -50,6 +51,17 @@ export const posts = sqliteTable('posts', {
    * 成对，缺 cid 就不能当父锚点 —— 所以「两列都非空」等价于「这条帖已成功发布」。
    */
   atprotoCid: text('atproto_cid'),
+  /**
+   * 这条帖是不是从 Bluesky 镜像来的。`null` = 未知（本列引入之前写的行）。
+   *
+   * **非有不可**：在 rkey 只有 TID 一种形态之后，「我们的 rkey 长 `pbhh-<id>`」这个区分
+   * 判据就死了 —— 镜像来的和本站发布的都是 TID，光看 `atproto_uri` 分不出来。
+   *
+   * 刻意**不给默认值**（保持可空）：镜像那条写入路径万一漏了它，读出来是 `null`，而
+   * `null` 会回退到「rkey 是不是 `pbhh-<id>`」这个老判据 —— 而镜像帖的 rkey 是 TID，
+   * 老判据给出的答案**恰好是对的**。有默认值反而会把「漏写」变成一个说不出口的错答案。
+   */
+  atprotoMirrored: integer('atproto_mirrored', { mode: 'boolean' }),
 }, table => [
   /**
    * 刻意用**普通唯一索引**而不是 `WHERE atproto_uri IS NOT NULL` 的部分索引：SQLite
@@ -67,10 +79,10 @@ export const postLikes = sqliteTable('post_likes', {
    * 这条赞对应的 `app.bsky.feed.like` 记录的 at-uri。**含义是「这条 (post, user)
    * 赞目前对应的、最近观测到的真实记录地址」**，而不是「我们发出去的那条」。
    *
-   * 本站发出的赞是确定性地址 `.../pbhh-like-<postId>`；从 Bluesky 同步回来的是
-   * 真实记录的地址（rkey 是 TID）。用户在别的客户端重新点时，这一列会被改指到
-   * 那条新记录 —— **因为客户端只会删掉它自己知道的那条**，存错一条就等于用户的
-   * 取消永远落不了地。
+   * 本站发出的赞用的是我们生成并存下来的 TID（与帖同理，见 `posts` 表）；从 Bluesky
+   * 同步回来的是那条真实记录的地址（rkey 也是 TID）。用户在别的客户端重新点时，这一列
+   * 会被改指到那条新记录 —— **因为客户端只会删掉它自己知道的那条**，存错一条就等于
+   * 用户的取消永远落不了地。
    *
    * 非有不可的另一个理由：取消赞的 JetStream 事件不带 `record`（读不到 subject），
    * 只能靠这个地址反查。

@@ -1,0 +1,1 @@
+ALTER TABLE `posts` ADD `atproto_mirrored` integer;
