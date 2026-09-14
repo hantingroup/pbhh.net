@@ -153,6 +153,8 @@ post:
     submit: Post
   comments: Comments
   readMore: Read more
+  mirrored: From Bluesky
+  mirroredHint: This post was synced from their Bluesky account. The like count here is this site's own — Bluesky likes are not included, and likes you leave here are not sent to Bluesky.
   notFound: Post not found
   replyCount: '{n} replies'
   reply:

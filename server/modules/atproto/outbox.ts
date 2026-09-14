@@ -2,6 +2,9 @@ import type { Tx } from './mirror'
 import { Agent, RichText, XRPCError } from '@atproto/api'
 import { and, asc, count, eq, lte } from 'drizzle-orm'
 import { atprotoOutbox, db, posts } from 'server/database'
+// rkey 的格式与「哪条帖是镜像来的」是同一个约定，两个方向共用一份定义。
+// 放在 `posts/rkey.ts` 而不是这里，因为 `posts/service.ts` 不能 import atproto。
+import { localRkey } from '../posts/rkey'
 import { getOAuthClient } from './client'
 import { atUri, POST_COLLECTION } from './mirror'
 import * as AtprotoService from './service'
@@ -25,6 +28,9 @@ import * as AtprotoService from './service'
  * 依赖方向：`posts/index.ts → atproto/outbox.ts → posts/service.ts`；`posts/service.ts`
  * **完全不 import atproto**，无环。这里也不 import `posts/service` —— 需要的字段
  * （`atproto_uri` / `atproto_cid` / `parentId`）`toItem` 都不给，直接查表更短。
+ *
+ * 唯一的例外是 `posts/rkey.ts`：它自己不 import 任何东西，且 rkey 的格式是读写两侧
+ * 共用的约定（写侧生成、读侧用来判断来源），必须只有一份定义。它不牵出依赖图。
  */
 
 /** `app.bsky.feed.post` 的 `text` 上限（lexicon：maxGraphemes 300）。 */
@@ -65,11 +71,6 @@ type OutboundMode = 'on' | 'dry' | 'off'
 function outboundMode(): OutboundMode {
   const raw = Bun.env.ATPROTO_OUTBOUND
   return raw === 'dry' || raw === 'off' ? raw : 'on'
-}
-
-/** 本条帖在本地 PDS 里的 rkey。确定性 —— 见模块说明第 4 条。 */
-export function localRkey(postId: number): string {
-  return `pbhh-${postId}`
 }
 
 // ─── 读取本地行 ───────────────────────────────────────────────────────────────

@@ -2,6 +2,8 @@ import type { SQL } from 'drizzle-orm'
 import { and, asc, count, desc, eq, inArray, isNotNull, isNull, sql } from 'drizzle-orm'
 import { db, postLikes, posts, users } from 'server/database'
 import { removeForDeletedPosts } from '../notification/service'
+// 叶子模块，自己不 import 任何东西 —— 见 `rkey.ts` 顶部对「为什么单独成文件」的说明。
+import { bskyPostUrl, isMirroredPost } from './rkey'
 
 function query(where?: SQL, order: 'asc' | 'desc' = 'desc') {
   return db
@@ -14,6 +16,7 @@ function query(where?: SQL, order: 'asc' | 'desc' = 'desc') {
       nickname: users.nickname,
       avatar: users.avatar,
       createdAt: posts.createdAt,
+      atprotoUri: posts.atprotoUri,
       likeCount: count(postLikes.username),
       replyCount: sql`(
         WITH RECURSIVE tree(id) AS (
@@ -46,6 +49,7 @@ function getLikedIds(viewerUsername?: string): Set<number> {
 
 type Row = ReturnType<typeof query>[number]
 function toItem(row: Row, likedIds: Set<number>) {
+  const isMirrored = isMirroredPost(row)
   return {
     id: row.id,
     parentId: row.parentId ?? undefined,
@@ -55,6 +59,17 @@ function toItem(row: Row, likedIds: Set<number>) {
     nickname: row.nickname ?? '',
     avatar: row.avatar ?? '',
     createdAt: row.createdAt!.getTime(),
+    /**
+     * 这条帖是不是从 Bluesky 镜像来的，以及它的原帖地址。
+     *
+     * 判断放在服务端而不是把 `atprotoUri` 直接丢给前端：`pbhh-<id>` 是服务端的不变量，
+     * 让客户端去比字符串等于把这个约定复制到第二个地方。
+     *
+     * `bskyUrl` 只有镜像帖才有 —— 本站发出去的帖虽然有 URI，但那是这里的内容，
+     * 给一个「去 Bluesky 看」的链接只是把人绕一圈。
+     */
+    isMirrored,
+    bskyUrl: isMirrored && row.atprotoUri ? bskyPostUrl(row.atprotoUri) : null,
     likeCount: row.likeCount,
     replyCount: row.replyCount,
     liked: likedIds.has(row.id),
