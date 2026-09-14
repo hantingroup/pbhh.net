@@ -4,6 +4,7 @@ import { computed, ref } from 'vue'
 import { useI18n } from 'vue-i18n'
 import { RouterLink } from 'vue-router'
 import PostItem from '@/components/PostItem.vue'
+import { Button } from '@/components/ui/button'
 
 interface ThreadNode {
   id: number
@@ -78,13 +79,16 @@ const continueThread = computed(() => cutByLimit.value && !canExpandDeeper.value
 /** 到这一层开始收窄缩进，让深层回复别把宽度吃光。 */
 const tightIndent = computed(() => props.depth >= props.visualDepthLimit)
 
-const toggleLabel = computed(() => {
-  if (repliesVisible.value)
-    return t('post.thread.collapse', { n: descendantCount.value })
-  if (cutByLimit.value)
-    return t('post.thread.expandDeeper', { n: descendantCount.value })
-  return t('post.thread.expand', { n: descendantCount.value })
-})
+/**
+ * 开关文案**只按「现在看不看得见」分**，不再区分「为什么看不见」。
+ *
+ * 上一版分过三档：收起后展开叫「展开 N 条回复」，被层级上限挡住叫「展开 N 条更深回复」。
+ * 那个「更深」得先解释「上限」才读得懂 —— 是实现细节漏到了界面上，而用户要的信息只有
+ * 一个：这一条下面还压着多少回复。所以两档合成一档。
+ */
+const toggleLabel = computed(() => repliesVisible.value
+  ? t('post.thread.collapse', { n: descendantCount.value })
+  : t('post.thread.expand', { n: descendantCount.value }))
 
 const postItemProps = computed(() => {
   const { children, parentId, parentUsername, parentNickname, parentContent, ...rest } = props.node
@@ -127,72 +131,74 @@ function toggleReplies() {
         @reply="emit('reply', node.id)"
         @deleted="emit('deleted', node.id)"
         @quote-click="emit('quoteClick', $event)"
-      />
+      >
+        <!--
+          折叠开关放在**父帖自己的操作栏**里，和「回复」「点赞」并排。
+          它管的本来就是这一条下面的回复，所以必须跟这条帖长在一起；挂在回复区左边时，
+          它的位置（父帖那一侧）和它的作用（下面那一串）是错开的。
+          它也是这条支线的唯一开关 —— 顶层回复同样有，不再靠 `depth > 1` 决定。
+        -->
+        <template v-if="hasChildren" #actions>
+          <!-- 超过上限、没法在原位再展开了，只能去详情页接着看。 -->
+          <Button
+            v-if="continueThread"
+            as-child
+            variant="ghost"
+            size="sm"
+            class="gap-1.5 h-8 px-2 text-sm text-muted-foreground rounded-full hover:text-foreground"
+          >
+            <RouterLink :to="`/post/${node.id}`" @click.stop>
+              <Plus />
+              {{ t('post.thread.continue', { n: descendantCount }) }}
+            </RouterLink>
+          </Button>
+
+          <Button
+            v-else
+            variant="ghost"
+            size="sm"
+            class="gap-1.5 h-8 px-2 text-sm text-muted-foreground rounded-full hover:text-foreground"
+            :aria-expanded="repliesVisible"
+            @click.stop="toggleReplies"
+          >
+            <Minus v-if="repliesVisible" />
+            <Plus v-else />
+            {{ toggleLabel }}
+          </Button>
+        </template>
+      </PostItem>
 
       <div v-if="replyingToId === node.id" class="thread-compose">
         <slot name="composer" :node="node" />
       </div>
 
-      <!--
-        回复区。折叠开关长在**这里**，不在节点自己的左侧。
-        它管的是这个节点的回复，所以必须和回复排在一起 —— 贴在节点头像旁边时，它看起来
-        像是收这条评论本身，而它实际收的是下面那一整串。
-        它同时是竖线的起点：默认层级用完之后，竖线到徽章为止，下面什么都不画。
-      -->
-      <div v-if="hasChildren" class="thread-replies">
-        <RouterLink
-          v-if="continueThread"
-          :to="`/post/${node.id}`"
-          class="thread-replies-toggle"
-        >
-          <span class="thread-badge">
-            <Plus class="size-3.5" />
-          </span>
-          {{ t('post.thread.continue', { n: descendantCount }) }}
-        </RouterLink>
-
-        <button
-          v-else
-          type="button"
-          class="thread-replies-toggle"
-          :aria-expanded="repliesVisible"
-          @click="toggleReplies"
-        >
-          <span class="thread-badge">
-            <Minus v-if="repliesVisible" class="size-3.5" />
-            <Plus v-else class="size-3.5" />
-          </span>
-          {{ toggleLabel }}
-        </button>
-
+      <div
+        v-if="repliesVisible"
+        class="thread-children"
+        :class="{ 'thread-children-tight': tightIndent }"
+      >
         <div
-          v-if="repliesVisible"
-          class="thread-children"
-          :class="{ 'thread-children-tight': tightIndent }"
+          v-for="(child, index) in node.children"
+          :key="child.id"
+          class="thread-child"
+          :class="{ 'thread-child-last': index === node.children.length - 1 }"
         >
-          <div
-            v-for="(child, index) in node.children"
-            :key="child.id"
-            class="thread-child"
-            :class="{ 'thread-child-last': index === node.children.length - 1 }"
+          <PostThreadNode
+            :node="child"
+            :depth="depth + 1"
+            :replying-to-id="replyingToId"
+            :visible-depth-limit="depthLimit"
+            :max-visible-depth="maxVisibleDepth"
+            :visual-depth-limit="visualDepthLimit"
+            :expand-step="expandStep"
+            @reply="emit('reply', $event)"
+            @deleted="emit('deleted', $event)"
+            @quote-click="emit('quoteClick', $event)"
           >
-            <PostThreadNode
-              :node="child"
-              :depth="depth + 1"
-              :replying-to-id="replyingToId"
-              :visible-depth-limit="depthLimit"
-              :max-visible-depth="maxVisibleDepth"
-              :visual-depth-limit="visualDepthLimit"
-              :expand-step="expandStep"
-              @reply="emit('reply', $event)"
-              @deleted="emit('deleted', $event)"
-              @quote-click="emit('quoteClick', $event)"
-            >
-              <template #composer="slotProps">
-                <slot name="composer" :node="slotProps.node" />
-              </template>
-            </PostThreadNode>
-          </div>
+            <template #composer="slotProps">
+              <slot name="composer" :node="slotProps.node" />
+            </template>
+          </PostThreadNode>
         </div>
       </div>
     </div>
@@ -201,15 +207,19 @@ function toggleReplies() {
 
 <style scoped>
 /*
-  整棵树只有两个自由量，都定义在 `.thread-node` 上：
-  - `--thread-gap`  节点内部各块之间、以及同级回复之间的距离；
-  - `--thread-indent`（见 `.thread-replies`）每一层回复的缩进。
-  竖线、肘部、折叠徽章的位置**全部由它们算出来**，不各自硬编码。上一版是反过来的：
-  缩进和竖线各有一串常量（2rem/1rem/1.35rem/0.75rem 配 -1.45/-0.95/-1rem），移动端
-  与深层层级叠在一起时两组值就对不上，线会跑到缩进框外面。
+  整棵树的自由量只有三个，都定义在 `.thread-node` 上：
+  - `--thread-gap`    节点内部各块之间、以及同级回复之间的距离；
+  - `--thread-indent` 每一层回复的缩进（**唯一需要按层级和屏宽改的量**）；
+  - `--thread-gutter` 竖线距节点左边缘的位置，固定，不跟缩进走。
+  竖线和肘部的位置全部由它们算出来，不各自硬编码。上一版是反过来的：缩进和竖线各有一串
+  常量（2rem/1rem/1.35rem/0.75rem 配 -1.45/-0.95/-1rem），移动端和深层层级叠在一起时
+  两组值就对不上，线会跑到缩进框外面。
 */
 .thread-node {
   --thread-gap: 0.75rem;
+  --thread-gutter: 0.55rem;
+  --thread-elbow-top: 1.15rem;
+  --thread-indent: 2rem;
   min-width: 0;
 }
 
@@ -223,62 +233,23 @@ function toggleReplies() {
   margin-top: var(--thread-gap);
 }
 
-.thread-replies {
-  /* 竖线固定在距回复区左边 `--thread-gutter` 处，与缩进无关 —— 这样缩进怎么变，线都
-     不会越出回复区；肘部的横向长度才是跟着缩进伸缩的那个量。 */
-  --thread-gutter: 0.55rem;
-  --thread-badge: 1.15rem;
-  /* 每一层回复的缩进。**唯一需要改的量**，见 `.thread-children-tight` 与媒体查询。 */
-  --thread-indent: 2rem;
-  --thread-elbow-top: 1.15rem;
-  position: relative;
+/*
+  回复区。**折叠开关不在这里** —— 它在父帖的操作栏里（见模板），所以这块只剩回复本身，
+  与上方卡片之间留一个 `--thread-gap`，和同级回复之间的距离是同一个值。
+*/
+.thread-children {
   margin-top: var(--thread-gap);
+  padding-left: var(--thread-indent);
 }
 
-/* 深层收窄。只改缩进，竖线与肘部自动跟随。 */
+/*
+  深层收窄。只改缩进的话竖线与肘部会自动跟随，但 gutter 必须跟着一起收：它固定 0.55rem
+  时，缩进降到 0.75rem 那一档只剩 0.2rem 横向余量，肘部连 0.92rem 的圆角都放不下 ——
+  视觉上竖线就是贴在卡片边上。
+*/
 .thread-children-tight {
   --thread-indent: 1rem;
-}
-
-.thread-replies-toggle {
-  display: inline-flex;
-  align-items: center;
-  gap: 0.4rem;
-  /* 让徽章中心正落在竖线上（回复区左边 --thread-gutter 处）。 */
-  margin-left: calc(var(--thread-gutter) - var(--thread-badge) / 2);
-  padding: 0;
-  border: 0;
-  background: transparent;
-  color: var(--muted-foreground);
-  font-size: 0.875rem;
-  text-decoration: none;
-  transition: color 150ms ease;
-}
-
-.thread-replies-toggle:hover {
-  color: var(--foreground);
-}
-
-/* 折叠徽章与「查看更多」的图标共用这一个类，尺寸因此不可能不一致。 */
-.thread-badge {
-  display: inline-flex;
-  flex: none;
-  align-items: center;
-  justify-content: center;
-  width: var(--thread-badge);
-  height: var(--thread-badge);
-  border: 1px solid color-mix(in oklch, var(--border) 90%, transparent);
-  border-radius: 999px;
-  background: color-mix(in oklch, var(--background) 96%, white);
-  transition: background-color 150ms ease, border-color 150ms ease;
-}
-
-.thread-replies-toggle:hover .thread-badge {
-  background: color-mix(in oklch, var(--muted) 86%, white);
-}
-
-.thread-children {
-  padding-left: var(--thread-indent);
+  --thread-gutter: 0.3rem;
 }
 
 .thread-child {
@@ -290,34 +261,28 @@ function toggleReplies() {
   margin-top: var(--thread-gap);
 }
 
-/* 竖线：从回复区顶端（折叠徽章下方）一直画到最后一个子节点的肘部。 */
+/*
+  竖线。顶端向上多画一个 `--thread-gap`，正好搭在父帖卡片的下边缘上 —— 否则回复区上方
+  那 0.75rem 留白会把线截成一段悬空的短线。
+*/
 .thread-child::before {
   content: "";
   position: absolute;
   left: calc(var(--thread-gutter) - var(--thread-indent));
-  top: 0;
+  top: calc(-1 * var(--thread-gap));
   bottom: calc(-1 * var(--thread-gap));
   width: 2px;
   border-radius: 999px;
   background: color-mix(in oklch, var(--border) 82%, transparent);
 }
 
-/* 非首个兄弟要把线接上去，补上它上面那段间距。 */
-.thread-child + .thread-child::before {
-  top: calc(-1 * var(--thread-gap));
-}
-
 /* 最后一个只画到肘部为止，否则线会拖过这条回复的最低处。 */
 .thread-child-last::before {
   bottom: auto;
-  height: var(--thread-elbow-top);
-}
-
-.thread-child + .thread-child-last::before {
   height: calc(var(--thread-gap) + var(--thread-elbow-top));
 }
 
-/* 肘部：竖线拐进这条回复的左边。宽度即缩进减去竖线到回复区左边的距离。 */
+/* 肘部：竖线拐进这条回复的左边。宽度即缩进减去竖线到节点左边缘的距离。 */
 .thread-child::after {
   content: "";
   position: absolute;
@@ -331,19 +296,12 @@ function toggleReplies() {
 }
 
 @media (max-width: 640px) {
-  .thread-replies {
+  .thread-node {
     --thread-indent: 1.35rem;
   }
 
   .thread-children-tight {
     --thread-indent: 0.75rem;
-  }
-
-  .thread-replies-toggle {
-    max-width: 100%;
-    line-height: 1.45;
-    white-space: normal;
-    word-break: break-word;
   }
 }
 </style>

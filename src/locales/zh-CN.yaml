@@ -154,7 +154,6 @@ post:
   replyCount: '{n} 条回复'
   thread:
     expand: 展开 {n} 条回复
-    expandDeeper: 展开 {n} 条更深回复
     collapse: 收起 {n} 条回复
     continue: 查看后续 {n} 条回复
   reply:

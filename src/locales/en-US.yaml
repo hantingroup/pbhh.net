@@ -159,7 +159,6 @@ post:
   replyCount: '{n} replies'
   thread:
     expand: Show {n} replies
-    expandDeeper: Show {n} deeper replies
     collapse: Hide {n} replies
     continue: View {n} more replies
   reply:
