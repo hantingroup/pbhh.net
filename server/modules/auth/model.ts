@@ -23,7 +23,6 @@ export const capability = t.Union([
   t.Literal('admin:view'),
   t.Literal('admin:edit'),
   t.Literal('admin:update'),
-  t.Literal('northern'),
 ])
 export const capabilities = t.Array(capability)
 
