@@ -40,6 +40,14 @@ export interface MirrorOutcome {
   postId: number
   uri: string
   cid: string
+  /**
+   * **夹取之后**、真正写进 `posts.created_at` 的那个时刻。
+   *
+   * 与 `record.createdAt` 不是一回事：后者是不可信输入，可能是 `"2099-01-01"`，
+   * 也可能整个缺失而回退到观测时刻。调用方要按「这条帖有多新」做决定时（比如
+   * 重同步要不要惊动粉丝），必须用这个值。
+   */
+  createdAt: Date
   did: string
   handle?: string
   rkey: string
@@ -163,6 +171,12 @@ export function mirrorRecord(tx: Tx, input: RecordInput): MirrorOutcome | undefi
     parentId = parent.id
   }
 
+  const createdAt = clampCreatedAt(
+    (record as { createdAt?: unknown }).createdAt,
+    input.observedAt,
+    input.maxPastMs ?? MAX_PAST_MS,
+  )
+
   // `on conflict do nothing` 是**回环吸收点**：写路径发出去的记录会被 JetStream
   // 送回来，靠 `posts.atproto_uri` 上的唯一索引在这里被吃掉。回填与实时流抢同一条
   // URI 时也走这里。
@@ -172,11 +186,7 @@ export function mirrorRecord(tx: Tx, input: RecordInput): MirrorOutcome | undefi
       username,
       content: text,
       parentId,
-      createdAt: clampCreatedAt(
-        (record as { createdAt?: unknown }).createdAt,
-        input.observedAt,
-        input.maxPastMs ?? MAX_PAST_MS,
-      ),
+      createdAt,
       atprotoUri: uri,
       atprotoCid: input.cid ?? null,
     })
@@ -192,6 +202,7 @@ export function mirrorRecord(tx: Tx, input: RecordInput): MirrorOutcome | undefi
     postId: inserted.id,
     uri,
     cid: input.cid ?? '',
+    createdAt,
     did: input.did,
     handle: identity.handle,
     rkey: input.rkey,
@@ -204,7 +215,8 @@ export function mirrorRecord(tx: Tx, input: RecordInput): MirrorOutcome | undefi
  * 事务提交后补发事件。第一条让 `PostPage.vue` 的实时刷新与粉丝通知零改动地继续
  * 工作。
  *
- * **回填不调用它** —— 见 `backfill.ts` 的说明。
+ * **回填默认不调用它**（绑定时的历史帖回填尤其不能调）；只有「重同步」这种
+ * 「这些帖本该由实时流过来说一遍」的场景才调，判断在 `backfill.ts` 里。
  */
 export function publishMirrored(outcome: MirrorOutcome): void {
   bus.publish('net.pbhh.post.created', { username: outcome.username, postId: outcome.postId })

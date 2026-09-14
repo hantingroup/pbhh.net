@@ -343,9 +343,12 @@ export async function drainResync(): Promise<void> {
   for (const did of batch) {
     resyncQueue.delete(did)
     lastResyncAt.set(did, Date.now())
+    // `publish: true` —— 断链漏掉的正是「本该由实时流通知过一遍」的那几条，粉丝本来
+    // 该收到通知却没收到。窗口与静默规则在 `backfill.ts` 里。
+    //
     // 身份可能刚好在这一刻被解绑：`restore` 会失败，而 `backfillFromPds` 自己吞掉
     // 所有异常只记日志，所以这里不需要额外保护。
-    await backfillFromPds(did)
+    await backfillFromPds(did, { publish: true })
   }
   if (resyncQueue.size)
     armResync()
