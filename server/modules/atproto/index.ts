@@ -7,7 +7,7 @@ import { backfillFromPds } from './backfill'
 import { getOAuthClient, isAtprotoConfigured, revokeSession, sweepExpiredStates } from './client'
 import { HANDLE_DOMAIN, SITE_ORIGIN } from './config'
 import { getJetstreamStatus, scheduleJetstreamReconnect, startJetstream } from './jetstream'
-import { getOutboxStatus, startOutbox } from './outbox'
+import { backfillLocalPosts, getOutboxStatus, startOutbox } from './outbox'
 import * as AtprotoService from './service'
 
 const SWEEP_INTERVAL_MS = 15 * 60 * 1000
@@ -160,6 +160,18 @@ export default new Elysia()
     // 加 `on conflict do nothing` 吸收。
     void backfillFromPds(session.did)
 
+    // 反方向：把用户**绑定之前**写在这里、还没发到 Bluesky 的帖补发过去。
+    //
+    // 出站写路径从建立起就是坏的（scope → rkey 两个 bug，见 outbox.ts 与 client.ts），
+    // 所以这段历史一条都没过去过；新绑定与重绑都走这里，于是「重绑后自动补」是免费的。
+    //
+    // **同步函数，不需要 await**：它只查库、只入队，一次网络调用都没有（投递归 worker）。
+    // 与上面那句 `backfillFromPds` 也不抢：入站镜像进来的行自带 uri，永远不是回填的候选。
+    //
+    // 有意的取舍是把绑定成功摆在第一位：它自己的失败只记日志、绝不往上抛，所以这里的
+    // 任何问题都不会让用户看到「授权成功但绑定失败」。
+    backfillLocalPosts(pending.username)
+
     return redirect(backToSettings({ atproto: 'bound' }))
   }, {
     query: t.Object({
@@ -242,3 +254,27 @@ export default new Elysia()
    * where status = 'dead'` 能拿到 uri、attempts 和 last_error。
    */
   .get('/me/bindings/atproto/outbox', () => getOutboxStatus())
+  /**
+   * 手动触发「把本站已有的帖补发到 Bluesky」。
+   *
+   * 绑定/重绑时已经自动跑过一次，这个端点给的是**再试一次**的入口：用户当时关着发布
+   * 开关、或者那一次因为别的原因没补上，后来想补。
+   *
+   * 与自动那一条**走同一个函数、同一套闸**（未绑定 / 关掉发布都不补），所以它也可能
+   * 什么都不做；`status` 就是要让前端把「没绑」和「开关关着」分开讲给用户听。
+   *
+   * **处理器保持同步**（`backfillLocalPosts` 全程无 await），这既是它不需要任何锁的原因，
+   * 也是一条要守住的约束 —— 见那个函数的说明。
+   */
+  .post('/me/bindings/atproto/backfill', ({ username, status }) => {
+    const result = backfillLocalPosts(username)
+    if (result.status === 'notBound')
+      return status(404, { message: 'atproto.notBound' })
+    // 补发就是「往 Bluesky 发新东西」，所以它受 `publishEnabled` 管。用 409 而不是静默
+    // 什么都不做：用户点了一下没反应，与「你得先去把开关打开」是两件事，后者要能说出口。
+    if (result.status === 'publishDisabled')
+      return status(409, { message: 'atproto.publishDisabled' })
+    if (result.status === 'error')
+      return status(500, { message: 'bind.atproto.backfillFailed' })
+    return result
+  })

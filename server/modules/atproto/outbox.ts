@@ -1,7 +1,7 @@
 import type { Tx } from './mirror'
 import { Agent, RichText, XRPCError } from '@atproto/api'
 import { TID } from '@atproto/common-web'
-import { and, asc, count, eq, inArray, lte } from 'drizzle-orm'
+import { and, asc, count, eq, inArray, isNull, lte } from 'drizzle-orm'
 import { atprotoOutbox, db, postLikes, posts } from 'server/database'
 import { getOAuthClient } from './client'
 import { atUri, LIKE_COLLECTION, POST_COLLECTION } from './mirror'
@@ -193,7 +193,11 @@ function resolveReplyRefs(parentId: number): ReplyRefs {
 
 type BuiltRecord =
   | { ok: true, record: Record<string, unknown> }
-  | { ok: false, reason: string }
+  /**
+   * `code` 给调用方**归类**（回填要按类计数），`reason` 给人看。两个都要：拿 reason
+   * 字符串去嗅探类别，等于让文案成为控制流的一部分。
+   */
+  | { ok: false, code: 'emptyText' | 'tooLong', reason: string }
 
 /**
  * 本地校验 + 造记录，一处收口。**失败即终态**：不重试、不入队，只记 warn。
@@ -210,12 +214,13 @@ type BuiltRecord =
 function buildRecord(post: PostRefRow & { content: string, createdAt: Date }): BuiltRecord {
   const text = post.content
   if (!text.trim())
-    return { ok: false, reason: '正文为空' }
+    return { ok: false, code: 'emptyText', reason: '正文为空' }
 
   const rich = new RichText({ text })
   if (rich.graphemeLength > MAX_GRAPHEMES) {
     return {
       ok: false,
+      code: 'tooLong',
       reason: `正文 ${rich.graphemeLength} 字素，超过 Bluesky 的 ${MAX_GRAPHEMES} 字素上限（不截断，见模块说明）`,
     }
   }
@@ -279,6 +284,15 @@ function attachReply(record: Record<string, unknown>, parentId: number | null): 
 // ─── 入队 ─────────────────────────────────────────────────────────────────────
 
 /**
+ * `mirrorLocalPost` 的结局。**建帖时的两个调用方忽略它**（`posts/index.ts`），回填
+ * 靠它分类计数 —— 那个调用方需要知道「入队了」与「因为父帖不在 Bluesky 上、永远发不
+ * 出去」的区别，而后者是**终态**，重跑一万次也还是这个结果。
+ */
+export type MirrorPostResult =
+  | { ok: true }
+  | { ok: false, reason: 'notBound' | 'publishDisabled' | 'alreadyPublished' | 'emptyText' | 'tooLong' | 'parentUnpublished' }
+
+/**
  * 建帖后调用。内部顺序**不能调换**（方案里的不变量 L）：
  *
  * 1. 未绑定 → 返回；2. 关掉了发布 → 返回；3. 该行已有 `atproto_uri` → 返回（幂等）；
@@ -290,12 +304,12 @@ function attachReply(record: Record<string, unknown>, parentId: number | null): 
  * 同步函数，没有 await —— 调用它的路由不必改成 async，也就不会出现「响应先于入队
  * 返回、进程被杀就丢一条删除」的窗口。
  */
-export function mirrorLocalPost(input: { username: string, postId: number }): void {
+export function mirrorLocalPost(input: { username: string, postId: number }): MirrorPostResult {
   const identity = AtprotoService.getIdentity(input.username)
   if (!identity)
-    return
+    return { ok: false, reason: 'notBound' }
   if (!identity.publishEnabled)
-    return
+    return { ok: false, reason: 'publishDisabled' }
 
   const post = db
     .select({
@@ -309,13 +323,15 @@ export function mirrorLocalPost(input: { username: string, postId: number }): vo
     .from(posts)
     .where(eq(posts.id, input.postId))
     .get()
+  // 行不存在也归到这里：对建帖那条路来说「行不在」与「已经发过」是同一个结局 ——
+  // 没什么可发的。回填的候选是从同一张表查出来的，不会命中这一支。
   if (!post || post.atprotoUri)
-    return
+    return { ok: false, reason: 'alreadyPublished' }
 
   const built = buildRecord(post)
   if (!built.ok) {
     console.warn(`[outbox] 帖 #${post.id} 不发送：${built.reason}`)
-    return
+    return { ok: false, reason: built.code }
   }
 
   // 回复在入队时就把锚点算一遍：父帖根本不在 Bluesky 上就没必要入队，直接在这里
@@ -329,7 +345,7 @@ export function mirrorLocalPost(input: { username: string, postId: number }): vo
     }
     else if (withReply.permanent) {
       console.warn(`[outbox] 回复 #${post.id} 不发送：${withReply.reason}`)
-      return
+      return { ok: false, reason: 'parentUnpublished' }
     }
   }
 
@@ -352,6 +368,184 @@ export function mirrorLocalPost(input: { username: string, postId: number }): vo
       .onConflictDoNothing({ target: [atprotoOutbox.uri, atprotoOutbox.kind] })
       .run()
   })
+  return { ok: true }
+}
+
+// ─── 回填 ─────────────────────────────────────────────────────────────────────
+
+/**
+ * 该用户**从未尝试发布过**的帖的 id，按 `id` 升序。
+ *
+ * `atproto_uri IS NULL` 就是「从未尝试过」的判据 —— 它由不变量 L 保证：uri 在任何
+ * 网络调用之前写好，所以 uri 非空意味着「要么已投递成功，要么有一行还在队列里，要么
+ * 那条队列行已经死了」。三种情况回填都不该再插一手，**第三种也一样**：把一条 uri 已定
+ * 的帖重新入队等于换个新 rkey 再发一遍，会在用户 repo 里留下一条孤儿记录，要同时给旧
+ * uri 入一条 delete 才收得干净。那是另一件事，不在这里做。
+ *
+ * `ORDER BY id ASC` **是承重的**，不是随手排序：`posts.id` 自增且 `parentId` 永远
+ * 指向更早的行，所以这个顺序天然保证**父帖排在回复之前**；而 `claim()` 也是按 outbox
+ * `id ASC` 取行，于是入队顺序 = 投递顺序 = 父先于子。那正是回复能在发送时刻解析出
+ * `reply.parent` 那个 strongRef 的前提。改成别的顺序会让回复先于父帖入队、进而先于
+ * 父帖投递，父帖那时还没有 cid ⇒ 回复白白撞一次 `pending` 退避。
+ *
+ * `deleted = false` 把软删的排除掉：它们要么已被 `enqueueDeletes` 收走，要么本来就没
+ * 发出去，重新发一遍是错的（`deliverPost` 也会把它们 drop 掉，但那是浪费一次查询）。
+ *
+ * **这里是一次全表扫**（`posts` 上只有 `atproto_uri` 那一个索引），量级上千条时也就
+ * 几毫秒，先不为此动迁移 —— 加索引要走 `drizzle-kit`，而这个仓库的迁移史里有一次快照
+ * 漂移事故，收益不抵风险。
+ */
+function unpublishedIds(username: string): number[] {
+  return db
+    .select({ id: posts.id })
+    .from(posts)
+    .where(and(
+      eq(posts.username, username),
+      eq(posts.deleted, false),
+      isNull(posts.atprotoUri),
+    ))
+    .orderBy(asc(posts.id))
+    .all()
+    .map(row => row.id)
+}
+
+/** 按终态原因分类。见 `BackfillPostsResult`。 */
+export interface BackfillSkips {
+  /**
+   * **结构上恒为 0**：候选全是 `atproto_uri IS NULL` 的行，`mirrorLocalPost` 的同一道
+   * 闸不可能在本次循环里翻过来。留着是为了让 `MirrorPostResult` 的每个 reason 都有
+   * 归宿 —— 否则下面那个 `switch` 就得写 `default`，而 `default` 会把「以后新增一种
+   * reason」变成一次静默漏算。
+   */
+  alreadyPublished: number
+  /**
+   * 父帖不在 Bluesky 上（含父帖是别人从未发布过的帖）。**终态**，补不了。
+   *
+   * 这一桶里混着一种**误报**：父链超过 `MAX_ANCESTOR_WALK`（64）环时 `resolveReplyRefs`
+   * 也返回 `unpublished`，而那种回复本身可能是能发的。本站的回复树是平铺的（深度 2 就到
+   * 顶了），所以走不到；真要走到了，得先看深度再看这条计数，别直接下结论说父帖不在
+   * Bluesky 上。
+   */
+  parentUnpublished: number
+  tooLong: number
+  emptyText: number
+}
+
+/**
+ * 一次回填的结果。**判别联合而不是「一个带状态字段的对象」** —— 后者的 `queued: 0`
+ * 有三种完全不同的含义（没绑、开关关着、真的一条都不用补），前端只能猜。做成判别联合
+ * 就逼着每个调用方分别对待。
+ */
+export type BackfillPostsResult =
+  | {
+    status: 'ok'
+    /** 已入队条数。真正会发出去的就是这些。 */
+    queued: number
+    /** 逐条处理时抛错的条数（数据库错误之类）。**其余候选不受影响**，见下面的循环。 */
+    failed: number
+    skipped: BackfillSkips
+    /** 跑完之后仍未发布的候选总数。`queued + failed + 各 skipped 之和` 之外没别的。 */
+    remaining: number
+  }
+  | { status: 'notBound' | 'publishDisabled' | 'error' }
+
+/**
+ * 把本站已有的帖补发到用户的 PDS —— 出站回填。
+ *
+ * **存在的理由**：出站写路径从建立起就是坏的（scope 不含 `repo:*`，随后是 rkey 不是
+ * 合法 TID，见模块说明与 `client.ts` 的 SCOPE 注释），所以在它修好之前，用户在这里
+ * 发的每一条帖都没发到过 Bluesky。这个函数把那段历史补上。
+ *
+ * 手动入口（设置页按钮）与自动入口（绑定/重绑时）**走的是同一个函数、同一套闸**，
+ * 所以两条路的行为不可能不一致。
+ *
+ * 只碰数据库，**不接网络** —— 它只入队，投递由 worker 按 FIFO 做（这也正是「按 id
+ * 升序」能决定投递顺序的原因）。同步函数，自动入口因此不必被 await。
+ *
+ * **刻意不做的四件事**（设置页的文案必须把第一条讲清楚，否则会被当成 bug 反复报）：
+ *
+ * 1. **父帖不在 Bluesky 上的回复永远补不上，不是暂时。** Bluesky 的回复必须带父帖的
+ *    `{uri, cid}` strongRef，而父帖若只存在于本站，那个 cid 谁也构造不出来。别人写的、
+ *    从未发布过的帖下的回复全归此类。
+ * 2. **已卡死的帖**（见 `unpublishedIds`）：uri 已定却从未投递成功，会被 uri 闸永久跳过。
+ * 3. **可能造出重复**：用户绑定前若已在 Bluesky 手动发过同样内容，这里会再发一条，而
+ *    两条之间没有任何共同标识可供比对（入站回填早就把 Bluesky 那条也镜像进来了，内容
+ *    一样、来源不同）。让用户自己删一条即可 —— 删除是幂等的、且我们控制得住。
+ * 4. **赞不补**。`post_likes` 没有时间列，而定 `put-like` 的 `createdAt` 只能靠入队
+ *    时刻；补出来的赞会带上一串「刚刚」的时间戳。而绝大多数历史赞的目标是别人的帖，
+ *    本来也锚不住。
+ *
+ * **这个函数必须全程同步**，一个 `await` 都不许加 —— 它因此不需要重入闸：Bun 的单线程
+ * 上，同步函数不会被打断，两次「同时」触发实际上是先后跑完的，第二次看到的已经是第一次
+ * 写完的状态（候选都被写上 uri 了 ⇒ 全部落进 `alreadyPublished`），不会算出重复的 TID。
+ * 一旦在循环里加 `await`（比如「先探一下 PDS 通不通」），这个论证当场失效，那时就必须补
+ * 一个重入闸，否则两次跑会在 `posts_atproto_uri_unique` 上撞车。
+ */
+export function backfillLocalPosts(username: string): BackfillPostsResult {
+  const identity = AtprotoService.getIdentity(username)
+  if (!identity)
+    return { status: 'notBound' }
+  // 补发**就是**「往 Bluesky 发新东西」，所以与 `mirrorLocalPost` 同受这个开关管。
+  // 反过来做的后果是：用户明确关掉了发布，却在设置页点一下把 28 条历史全推出去。
+  if (!identity.publishEnabled)
+    return { status: 'publishDisabled' }
+
+  try {
+    const skipped: BackfillSkips = { alreadyPublished: 0, parentUnpublished: 0, tooLong: 0, emptyText: 0 }
+    let queued = 0
+    let failed = 0
+
+    // 一个**必然会被误读**的细节，先写在这里：这一批里若有回复，它的父帖是刚刚才被写上
+    // uri 的（就在上一轮循环），cid 还没有 —— 投递是 worker 的事。于是 `attachReply` 判
+    // `pending`，**存进 outbox 的那份 record 里没有 `reply` 字段**。这是对的，不是漏了：
+    // 投递时刻 `deliverPost` 会用当时的 cid 重算补上（见 `attachReply` 的说明），而 FIFO
+    // 保证父帖先投递成功、cid 先落地。看到存的 JSON 里没有 reply 就当 bug 报是误读。
+    for (const postId of unpublishedIds(username)) {
+      // **逐条 try/catch，不是包住整个循环**：一条候选炸了（比如 TID 真的撞了唯一索引）
+      // 不该让后面 27 条一起泡汤 —— 那些才是这次回填的主体。
+      try {
+        const result = mirrorLocalPost({ username, postId })
+        if (result.ok) {
+          queued++
+          continue
+        }
+        // 没有 `default` 是有意的：`MirrorPostResult` 以后新增 reason 时，TS 会在这里
+        // 报错，逼着人来决定它该算哪一类，而不是被静默漏算。
+        switch (result.reason) {
+          case 'alreadyPublished':
+            skipped.alreadyPublished++
+            break
+          case 'parentUnpublished':
+            skipped.parentUnpublished++
+            break
+          case 'tooLong':
+            skipped.tooLong++
+            break
+          case 'emptyText':
+            skipped.emptyText++
+            break
+          // 上面两道闸本轮已经查过（同一进程、同一次调用，中间没人能改），走不到这里。
+          // 真走到了只能是一次竞态解绑，不计入任何一类。
+          case 'notBound':
+          case 'publishDisabled':
+            break
+        }
+      }
+      catch (err) {
+        failed++
+        console.error(`[outbox] 回填 帖 #${postId} 出错:`, err)
+      }
+    }
+
+    return { status: 'ok', queued, failed, skipped, remaining: unpublishedIds(username).length }
+  }
+  catch (err) {
+    // 走到这里说明连候选查询都失败了。**必须兜住**：自动入口是在 OAuth 回调里跑的，
+    // 那里抛出去会把「绑定成功」变成一个 500，而用户其实已经绑好了。与 `backfillFromPds`
+    // 同策（见它的注释）。
+    console.error('[outbox] 回填本地帖失败:', err)
+    return { status: 'error' }
+  }
 }
 
 export interface OutboundDelete { id: number, atprotoUri: string }

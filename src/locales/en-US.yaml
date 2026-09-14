@@ -254,6 +254,24 @@ bind:
       Covers likes only — when off, likes you make on Bluesky stop coming here
       (ones already synced are unaffected). Posts mirrored from Bluesky are
       not affected by this switch.
+    backfillLabel: Sync existing posts
+    backfillHint: >-
+      Publishes posts you wrote here before linking, which never made it to
+      Bluesky. Titles do not travel with them; replies are added to their
+      original thread.
+    backfill: Sync now
+    backfillQueued: '{n} queued and on their way to Bluesky.'
+    backfillErrored: '{n} failed — you can try again later.'
+    backfillParentUnpublished: >-
+      {n} replies can never be synced, because their parent post is not on
+      Bluesky.
+    backfillUnusable: >-
+      {n} have empty or over-300-character text, which Bluesky will not accept.
+    backfillRemaining: '{n} could not be synced.'
+    backfillNothing: Nothing to sync.
+    backfillPublishDisabled: >-
+      Turn on "Publish my posts and likes here to Bluesky" above first.
+    backfillFailed: Sync failed. Please try again later.
     publishFailed: The setting could not be saved. Please try again later.
     unbindKeepsPosts: >-
       Unlinking does not delete posts you have already published to Bluesky.

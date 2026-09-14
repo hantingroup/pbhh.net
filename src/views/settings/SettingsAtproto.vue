@@ -46,6 +46,8 @@ const redirecting = ref(false)
 const unbinding = ref(false)
 /** 两个开关共用：它们的失败语义逐字相同，分成两个状态只会有一个忘记复位。 */
 const savingSwitch = ref(false)
+/** 出站回填（同步历史帖）。防连点 —— 后端不需要锁，但连点会让按钮闪烁。 */
+const syncingBackfill = ref(false)
 const actionError = ref('')
 const notice = ref('')
 
@@ -202,6 +204,61 @@ function setPublish(enabled: boolean) {
 function setSyncLikes(enabled: boolean) {
   return saveSwitch('syncLikesEnabled', enabled)
 }
+
+/**
+ * 把本站已有的帖补发到 Bluesky。绑定/重绑时后端已经自动跑过一次，这里是「再试一次」。
+ *
+ * 提示文案由**计数**拼出来，不是一句「同步成功」：`queued` 为 0 也可能是一次完全正常的
+ * 运行 —— 候选全都因为父帖不在 Bluesky 上而补不了。那种情况要说的恰恰是「补不了的是
+ * 哪些、为什么」，现在不说清，用户就会把它当成 bug 反复报。
+ *
+ * 开关关着时按钮是禁用的，所以后端那个 409 只有「另一个标签页刚把开关关掉」才会撞上；
+ * 真撞上了走通用失败文案即可，不必在这里分辨状态码。
+ */
+async function syncHistory() {
+  syncingBackfill.value = true
+  actionError.value = ''
+  notice.value = ''
+  try {
+    const { data, error } = await api.me.bindings.atproto.backfill.post()
+    if (error || !data)
+      throw new Error(String(error))
+    // **必须收窄**：Eden 把 `status(...)` 那几支的 body 也并进了 `data` 的类型，所以
+    // 它可能是三种拒绝中的任意一种，直接当成功读会读到 undefined。
+    if (data.status === 'publishDisabled') {
+      actionError.value = t('bind.atproto.backfillPublishDisabled')
+      return
+    }
+    if (data.status !== 'ok') {
+      actionError.value = t('bind.atproto.backfillFailed')
+      return
+    }
+
+    const parts: string[] = []
+    if (data.queued > 0)
+      parts.push(t('bind.atproto.backfillQueued', { n: data.queued }))
+    if (data.failed > 0)
+      parts.push(t('bind.atproto.backfillErrored', { n: data.failed }))
+    if (data.skipped.parentUnpublished > 0)
+      parts.push(t('bind.atproto.backfillParentUnpublished', { n: data.skipped.parentUnpublished }))
+    const unusable = data.skipped.tooLong + data.skipped.emptyText
+    if (unusable > 0)
+      parts.push(t('bind.atproto.backfillUnusable', { n: unusable }))
+    // 兜底：还剩着没同步的，而上面几条都没认领它（比如 `alreadyPublished` 那一类 ——
+    // 它在回填里结构上恒为 0，但真出现了也不能让它没有下文）。
+    if (!parts.length && data.remaining > 0)
+      parts.push(t('bind.atproto.backfillRemaining', { n: data.remaining }))
+    if (!parts.length)
+      parts.push(t('bind.atproto.backfillNothing'))
+    notice.value = parts.join(' ')
+  }
+  catch {
+    actionError.value = t('bind.atproto.backfillFailed')
+  }
+  finally {
+    syncingBackfill.value = false
+  }
+}
 </script>
 
 <template>
@@ -297,6 +354,29 @@ function setSyncLikes(enabled: boolean) {
               :disabled="savingSwitch"
               @update:model-value="setSyncLikes"
             />
+          </div>
+
+          <!--
+            出站回填。位置在解绑之上 —— 解绑是这一页唯一的破坏性动作，它该排在最后。
+            开关关着就不给点：后端的 409 与这里的禁用是同一件事的两面，禁用是为了不让
+            用户靠一次失败才发现「你得先把上面那个开关打开」。
+          -->
+          <div class="space-y-2 border-t pt-4">
+            <p class="text-sm font-medium">
+              {{ t('bind.atproto.backfillLabel') }}
+            </p>
+            <p class="text-xs text-muted-foreground">
+              {{ t('bind.atproto.backfillHint') }}
+            </p>
+            <Button
+              variant="outline"
+              class="w-full"
+              :disabled="syncingBackfill || !binding.publishEnabled"
+              @click="syncHistory"
+            >
+              <Spinner v-if="syncingBackfill" data-icon="inline-start" />
+              {{ t('bind.atproto.backfill') }}
+            </Button>
           </div>
 
           <AlertDialog>
