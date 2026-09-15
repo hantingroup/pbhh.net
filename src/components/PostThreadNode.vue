@@ -58,11 +58,8 @@ const hasChildren = computed(() => props.node.children.length > 0)
 const descendantCount = computed(() => countDescendants(props.node))
 
 /**
- * 本节点额外放开的层数。**存相对量，不存绝对上限的副本。**
- *
- * 副本必须在 `visibleDepthLimit` 变化时用 watch 同步回来，而祖先任何一次展开或收起都会
- * 触发那个 watch，于是本节点自己放开的层数被一起抹掉 —— 表现是「在深层展开过的东西会莫
- * 名收回」。相对量没有这个问题：祖先怎么变都只是换一个基数。
+ * 本节点额外放开的层数。**存相对量，不存绝对上限的副本** —— 副本得跟着 `visibleDepthLimit`
+ * 用 watch 同步，而祖先每次展开或收起都会触发那个 watch，本节点自己放开的层数就被一起抹掉。
  */
 const extraDepth = ref(0)
 /** 用户主动收起本节点的回复。与 `extraDepth` 分开存：收起再展开要回到原来的层级。 */
@@ -79,13 +76,7 @@ const continueThread = computed(() => cutByLimit.value && !canExpandDeeper.value
 /** 到这一层开始收窄缩进，让深层回复别把宽度吃光。 */
 const tightIndent = computed(() => props.depth >= props.visualDepthLimit)
 
-/**
- * 开关文案**只按「现在看不看得见」分**，不再区分「为什么看不见」。
- *
- * 上一版分过三档：收起后展开叫「展开 N 条回复」，被层级上限挡住叫「展开 N 条更深回复」。
- * 那个「更深」得先解释「上限」才读得懂 —— 是实现细节漏到了界面上，而用户要的信息只有
- * 一个：这一条下面还压着多少回复。所以两档合成一档。
- */
+/** 文案只按「现在看不看得见」分，不解释「为什么看不见」—— 读者要知道的只有下面还压着几条。 */
 const toggleLabel = computed(() => repliesVisible.value
   ? t('post.thread.collapse', { n: descendantCount.value })
   : t('post.thread.expand', { n: descendantCount.value }))
@@ -96,13 +87,8 @@ const postItemProps = computed(() => {
 })
 
 /**
- * 一个按钮管三件事，动作按**回复现在为什么看不见**分岔：
- * - 看得见 → 收起来；
- * - 被层级上限挡住 → 再放开 `expandStep` 层；
- * - 只是被用户收起来了 → 原样放回来。
- *
- * 分岔依据刻意不是图标 —— 「现在看得见/看不见」是显示状态，拿它当判据的话，图标一有偏差
- * 动作就跟着错。这里两个条件都直接来自状态本身，图标只是它们的呈现。
+ * 一个按钮管三件事，按**回复现在为什么看不见**分岔：看得见 → 收起；被层级上限挡住 →
+ * 再放开 `expandStep` 层；只是被用户收起来 → 原样放回。判据取自状态本身，不是图标。
  */
 function toggleReplies() {
   if (!hasChildren.value)
@@ -133,10 +119,8 @@ function toggleReplies() {
         @quote-click="emit('quoteClick', $event)"
       >
         <!--
-          折叠开关放在**父帖自己的操作栏**里，和「回复」「点赞」并排。
-          它管的本来就是这一条下面的回复，所以必须跟这条帖长在一起；挂在回复区左边时，
-          它的位置（父帖那一侧）和它的作用（下面那一串）是错开的。
-          它也是这条支线的唯一开关 —— 顶层回复同样有，不再靠 `depth > 1` 决定。
+          折叠开关放进父帖自己的操作栏（`PostItem` 的 `actions` 插槽），和「回复」「点赞」并排：
+          它管的本来就是这条下面的回复，挂在回复区左边时位置和作用是错开的。
         -->
         <template v-if="hasChildren" #actions>
           <!-- 超过上限、没法在原位再展开了，只能去详情页接着看。 -->
@@ -210,10 +194,8 @@ function toggleReplies() {
   整棵树的自由量只有三个，都定义在 `.thread-node` 上：
   - `--thread-gap`    节点内部各块之间、以及同级回复之间的距离；
   - `--thread-indent` 每一层回复的缩进（**唯一需要按层级和屏宽改的量**）；
-  - `--thread-gutter` 竖线距节点左边缘的位置，固定，不跟缩进走。
-  竖线和肘部的位置全部由它们算出来，不各自硬编码。上一版是反过来的：缩进和竖线各有一串
-  常量（2rem/1rem/1.35rem/0.75rem 配 -1.45/-0.95/-1rem），移动端和深层层级叠在一起时
-  两组值就对不上，线会跑到缩进框外面。
+  - `--thread-gutter` 竖线距节点左边缘的位置。
+  竖线和肘部的位置全部由它们算出来，不各自硬编码。
 */
 .thread-node {
   --thread-gap: 0.75rem;
@@ -233,19 +215,15 @@ function toggleReplies() {
   margin-top: var(--thread-gap);
 }
 
-/*
-  回复区。**折叠开关不在这里** —— 它在父帖的操作栏里（见模板），所以这块只剩回复本身，
-  与上方卡片之间留一个 `--thread-gap`，和同级回复之间的距离是同一个值。
-*/
+/* 与上方卡片留一个 `--thread-gap`，和同级回复之间的距离是同一个值。 */
 .thread-children {
   margin-top: var(--thread-gap);
   padding-left: var(--thread-indent);
 }
 
 /*
-  深层收窄。只改缩进的话竖线与肘部会自动跟随，但 gutter 必须跟着一起收：它固定 0.55rem
-  时，缩进降到 0.75rem 那一档只剩 0.2rem 横向余量，肘部连 0.92rem 的圆角都放不下 ——
-  视觉上竖线就是贴在卡片边上。
+  深层收窄。缩进改了竖线与肘部会自动跟随，但 gutter 必须跟着一起收：固定 0.55rem 时，
+  缩进降到 0.75rem 那一档只剩 0.2rem 余量，肘部的 0.92rem 圆角放不下，线就贴在卡片边上。
 */
 .thread-children-tight {
   --thread-indent: 1rem;
@@ -261,10 +239,7 @@ function toggleReplies() {
   margin-top: var(--thread-gap);
 }
 
-/*
-  竖线。顶端向上多画一个 `--thread-gap`，正好搭在父帖卡片的下边缘上 —— 否则回复区上方
-  那 0.75rem 留白会把线截成一段悬空的短线。
-*/
+/* 顶端向上多画一个 `--thread-gap`，正好搭在父帖卡片的下边缘上，否则线会悬空一截。 */
 .thread-child::before {
   content: "";
   position: absolute;

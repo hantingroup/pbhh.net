@@ -173,10 +173,7 @@ function handleReplyClick() {
         </span>
       </div>
 
-      <!--
-        `flex-wrap`：线程节点会往这一行塞第四个按钮（折叠开关，带计数），
-        而按钮是 `whitespace-nowrap` 的，窄屏上四个并排有顶破卡片的风险。宁可换行，不要溢出。
-      -->
+      <!-- `flex-wrap`：线程节点会往这一行塞第四个按钮（折叠开关），窄屏上并排有顶破卡片的风险。 -->
       <div class="flex flex-wrap items-center mt-2 -ml-2 select-none">
         <Button
           variant="ghost"
