@@ -4,20 +4,18 @@ import { useRouter } from 'vue-router'
 import NavBrand from '@/components/NavBrand.vue'
 import NavUser from '@/components/NavUser.vue'
 import { ScrollArea } from '@/components/ui/scroll-area'
-import { API_BASE, TOKEN, unreadCount, user } from '@/lib/api'
+import { API_BASE, unreadCount, user } from '@/lib/api'
 
 let sse: EventSource | null = null
 
 onMounted(() => {
-  if (!user.value || !TOKEN.value)
+  if (!user.value)
     return
-  // EventSource 不能设请求头，token 只能走 query。这里只订阅通知话题，而服务端
-  // 的匿名白名单里**没有** `net.pbhh.notify.*`，所以 token 是必需的。
-  const query = new URLSearchParams({
-    token: TOKEN.value,
-    topics: 'net.pbhh.notify.*',
-  })
-  sse = new EventSource(`${API_BASE}/events/sse?${query}`)
+  // 这里只订阅通知话题，而服务端的匿名白名单里**没有** `net.pbhh.notify.*`，
+  // 所以凭据是必需的 —— 而 EventSource 设不了请求头，过去只能把 token 塞进 query。
+  // 现在它跟着 cookie 走：跨源必须显式 `withCredentials`，否则服务端回了 Set-Cookie
+  // 也会被丢掉，这条流会一直 401（而 401 对 EventSource 是致命的，不会重连）。
+  sse = new EventSource(`${API_BASE}/events/sse?topics=net.pbhh.notify.*`, { withCredentials: true })
   sse.onmessage = (e) => {
     const event = JSON.parse(e.data) as { topic: string, payload: { recipientUsername?: string } }
     if (event.topic.startsWith('net.pbhh.notify.') && event.payload.recipientUsername === user.value?.username)

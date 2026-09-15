@@ -7,7 +7,7 @@ import { Button } from '@/components/ui/button'
 import { Spinner } from '@/components/ui/spinner'
 import { useFields } from '@/composables/useFields'
 import { useValidators } from '@/composables/useValidators'
-import { api, fetchUser, TOKEN } from '@/lib/api'
+import { api, fetchUser } from '@/lib/api'
 
 const router = useRouter()
 const { t, te } = useI18n()
@@ -18,7 +18,9 @@ const { fields, filled, hasErrors } = useFields({
 })
 
 async function handleSubmit(): Promise<string | void> {
-  const { data, error } = await api.login.post({
+  // 凭据由服务端通过 `Set-Cookie` 落地，响应体里那份 `token` 是给非浏览器
+  // 客户端的，这里收下也没用（httpOnly 的 cookie 前端写不进去）。
+  const { error } = await api.login.post({
     username: fields.username.value.value,
     password: fields.password.value.value,
   })
@@ -28,7 +30,6 @@ async function handleSubmit(): Promise<string | void> {
     return key && te(key) ? t(key) : t('error.loginFailed')
   }
 
-  TOKEN.value = data.token
   await fetchUser()
   if (window.history.length > 1)
     router.back()

@@ -11,6 +11,12 @@ export const users = sqliteTable('users', {
   password: text('password').notNull(),
   avatar: text('avatar').notNull().default(''),
   createdAt: integer('created_at', { mode: 'timestamp' }).notNull().$defaultFn(() => new Date()),
+  /**
+   * 登出撤销用。签发的 JWT 里带 `ver`，守卫拿它和这一列比对，不等就当没登录。
+   * 登出时 +1 —— 代价是**该用户所有设备一起掉线**（没有按设备撤销的概念）；
+   * 好处是不必存会话表，也能让「登出」真的作废凭据，而不是只把 cookie 抹掉。
+   */
+  tokenVersion: integer('token_version').notNull().default(0),
 }, () => [
   /**
    * 唯一性必须大小写不敏感（`Alice` 与 `alice` 是同一个人的两种写法），但主键是

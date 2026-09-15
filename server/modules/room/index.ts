@@ -1,7 +1,7 @@
 import type { ClientMsg } from './model'
 import process from 'node:process'
 import { Elysia } from 'elysia'
-import { requireAuth } from '../auth/guard'
+import { requireAuth, usernameFromCredentials } from '../auth/guard'
 import { jwtPlugin } from '../jwt'
 
 import * as FeiHuaLing from './games/feihualing'
@@ -142,7 +142,6 @@ export default new Elysia({ prefix: '/rooms' })
   .ws('/ws/:roomId', {
     query: wsQuery,
     async open(ws) {
-      const { token } = ws.data.query
       const { roomId: roomIdStr } = ws.data.params
       const roomId = Number(roomIdStr)
 
@@ -152,15 +151,17 @@ export default new Elysia({ prefix: '/rooms' })
         return
       }
 
-      const payload = await ws.data.jwt.verify(token)
-      if (!payload || typeof payload.sub !== 'string') {
-        // 未登录：作为只读观察者接收广播
+      // 凭据只来自 cookie —— 浏览器的 `WebSocket` 设不了请求头。
+      // 拿不到（没登录、已过期、已登出）就**静默降级成只读观察者**，和过去 token
+      // 无效时的行为一致。注意这条路的失败是无声的：cookie 一旦整体取不到，
+      // 所有人都会变成观察者而不报错，排查时先看这里。
+      const username = await usernameFromCredentials(ws.data.jwt, ws.data)
+      if (!username) {
         if (!RoomService.roomObservers.has(roomId))
           RoomService.roomObservers.set(roomId, new Map())
         RoomService.roomObservers.get(roomId)!.set(ws.raw, data => ws.send(data))
         return
       }
-      const username = payload.sub
 
       const [userInfo] = await RoomService.getUserInfo(username)
 

@@ -1,5 +1,6 @@
 import { Elysia, t } from 'elysia'
-import { requireAuth } from '../auth/guard'
+import { readAuthToken } from '../auth/cookie'
+import { requireAuth, usernameFromCredentials } from '../auth/guard'
 import { jwtPlugin } from '../jwt'
 import { bus } from './bus'
 import { clearWebhook, getSubscriber, registerSse, registerWs, setWebhook, unregister } from './deliver'
@@ -10,7 +11,6 @@ import { isValidTopicSuffix, pushBody, subscribeBody } from './model'
 const encoder = new TextEncoder()
 
 const streamQuery = t.Object({
-  token: t.Optional(t.String()),
   topics: t.Optional(t.String()),
 })
 
@@ -41,16 +41,18 @@ export default new Elysia({ prefix: '/events' })
   .ws('/ws', {
     query: streamQuery,
     async open(ws) {
-      const { token, topics } = ws.data.query
+      const { topics } = ws.data.query
 
-      const payload = token ? await ws.data.jwt.verify(token) : null
-      if (!payload || typeof payload.sub !== 'string') {
+      // 浏览器的 `WebSocket` 构造器设不了请求头，所以这里只能看 cookie ——
+      // 这也正是过去把 token 塞进 `?token=` 的原因，现在不必了。
+      const username = await usernameFromCredentials(ws.data.jwt, ws.data)
+      if (!username) {
         ws.close()
         return
       }
 
       registerWs(ws.raw, {
-        username: payload.sub,
+        username,
         topics: parseTopics(topics),
         send: data => ws.send(data),
       })
@@ -70,17 +72,20 @@ export default new Elysia({ prefix: '/events' })
       unregister(ws.raw)
     },
   })
-  .get('/sse', async ({ query, jwt, status }) => {
-    const { token, topics: topicsParam } = query
+  .get('/sse', async ({ query, jwt, headers, cookie, status }) => {
+    const { topics: topicsParam } = query
 
-    // 非法 token 一律 401，**绝不降级成匿名** —— 降级会让前端以为自己仍处于已
+    const credentials = { headers, cookie }
+    const token = readAuthToken(credentials)
+    const username = token ? await usernameFromCredentials(jwt, credentials) : undefined
+
+    // 凭据非法一律 401，**绝不降级成匿名** —— 降级会让前端以为自己仍处于已
     // 认证状态，症状是通知红点永远不动，比直接报错难查得多。
-    const payload = token ? await jwt.verify(token) : null
-    if (token && (!payload || typeof payload.sub !== 'string'))
+    // 注意「没有凭据」和「凭据无效」要分开：前者是合法的匿名订阅，后者是错误。
+    if (token && !username)
       return status(401, { message: 'error.unauthorized' })
 
     // 匿名连接没有 username，因此在投递层收不到任何点对点事件 —— 也就是收不到通知。
-    const username = payload && typeof payload.sub === 'string' ? payload.sub : undefined
     const anonymous = !username
 
     // 两道控制是刻意冗余的。**闸门（`allow`）才是安全边界**，因为只有它能拦住匿名

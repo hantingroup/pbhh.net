@@ -20,7 +20,7 @@ import { Button } from '@/components/ui/button'
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
 import { Spinner } from '@/components/ui/spinner'
 import { Switch } from '@/components/ui/switch'
-import { api, API_BASE, TOKEN } from '@/lib/api'
+import { api, API_BASE, user } from '@/lib/api'
 
 const { t } = useI18n()
 const route = useRoute()
@@ -127,7 +127,10 @@ onMounted(() => {
 function startBind() {
   actionError.value = ''
   notice.value = ''
-  if (!TOKEN.value) {
+  // 本地只剩「界面以为的登录态」可看（cookie 是 httpOnly 的）。这条路由本身挂了
+  // `authRequired`，走到这里 `user` 一定有值，所以它拦的只是异常路径 —— 真到了
+  // 服务端手上才发现凭据失效，用户会停在一页裸 JSON 的 401 上。
+  if (!user.value) {
     actionError.value = t('error.unauthorized')
     return
   }
@@ -135,12 +138,14 @@ function startBind() {
   if (handleError.value)
     return
 
+  // 顶层跳转没法带 Authorization 头，但**带得上 cookie**：`SameSite=Lax` 允许
+  // 同站顶层 GET 携带，而 `pbhh.net` 与 `api.pbhh.net` 是同站。
+  // 以前这里把 token 放进 query，等于把凭据经 `Referer` 和 access log 送给
+  // atproto 的第三方授权服务器 —— 这是换 cookie 最要紧的一处。
   const query = new URLSearchParams({
-    token: TOKEN.value,
     handle: handle.value.trim().toLowerCase(),
     mode: 'bind',
   })
-  // 顶层跳转没法带 Authorization 头，所以 token 走 query（见 server 侧注释）。
   // 生产环境 API 在另一个子域，router.push 跨不了源，只能用 location。
   redirecting.value = true
   window.location.href = `${API_BASE}/atproto/oauth/login?${query}`

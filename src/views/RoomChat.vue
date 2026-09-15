@@ -608,7 +608,6 @@ const handlers = {
 
 async function loadRoom() {
   roomNotFound.value = false
-  const token = localStorage.getItem('token') ?? ''
 
   const { data: roomList } = await api.rooms.get()
   if (roomList) {
@@ -630,8 +629,10 @@ async function loadRoom() {
     scrollToBottom()
   }
 
+  // 凭据走 cookie，握手上浏览器自己会带 —— `WebSocket` 构造器设不了请求头，
+  // 所以这里没有别的路可走，也正因如此以前只能把 token 塞进 query。
   const origin = API_BASE.replace(/^http/, 'ws')
-  ws = new WebSocket(`${origin}/rooms/ws/${props.id}?token=${encodeURIComponent(token)}`)
+  ws = new WebSocket(`${origin}/rooms/ws/${props.id}`)
 
   ws.onopen = () => {
     pingInterval = setInterval(() => {

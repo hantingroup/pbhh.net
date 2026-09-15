@@ -9,7 +9,7 @@ import { Button } from '@/components/ui/button'
 import { Spinner } from '@/components/ui/spinner'
 import { useFields } from '@/composables/useFields'
 import { useValidators } from '@/composables/useValidators'
-import { api, fetchUser, TOKEN } from '@/lib/api'
+import { api, fetchUser } from '@/lib/api'
 
 const { t, te } = useI18n()
 const router = useRouter()
@@ -41,7 +41,8 @@ function getFieldHint(key: string) {
 }
 
 async function handleSubmit(): Promise<string | void> {
-  const { data, error } = await api.signup.post({
+  // 同 Login.vue：凭据走服务端下发的 httpOnly cookie，响应体里的 `token` 不收。
+  const { error } = await api.signup.post({
     username: fields.username.value.value,
     nickname: fields.nickname.value.value,
     password: fields.password.value.value,
@@ -52,7 +53,6 @@ async function handleSubmit(): Promise<string | void> {
     return key && te(key) ? t(key) : t('error.signupFailed')
   }
 
-  TOKEN.value = data.token
   await fetchUser()
   router.push('/')
 }

@@ -1,16 +1,58 @@
 import { Elysia } from 'elysia'
 import { jwtPlugin } from '../jwt'
+import { readAuthToken } from './cookie'
+import { getTokenVersion } from './service'
 
-/** 从 `Authorization: Bearer <jwt>` 解出 username；没有或无效则不返回任何东西。 */
-async function parseUsername({ headers, jwt }: {
-  headers: Record<string, string | undefined>
-  jwt: { verify: (token: string) => Promise<unknown> }
-}) {
-  if (headers.authorization?.startsWith('Bearer ')) {
-    const payload = await jwt.verify(headers.authorization.slice(7))
-    if (payload && typeof payload === 'object' && 'sub' in payload && typeof payload.sub === 'string')
-      return { username: payload.sub }
-  }
+interface JwtVerifier {
+  verify: (token: string) => Promise<unknown>
+}
+
+/** 从 payload 里取出要用的两个 claim；形状不对就当作没有。 */
+function readClaims(payload: unknown) {
+  if (!payload || typeof payload !== 'object' || !('sub' in payload) || typeof payload.sub !== 'string')
+    return
+  return { username: payload.sub, ver: 'ver' in payload ? payload.ver : undefined }
+}
+
+/**
+ * **只验签**并取出 username，不看 `ver`。
+ *
+ * `/logout` 要用它：凭据已经失效的人也得能把自己的 cookie 清掉，否则会卡在
+ * 「登出不了、又进不去」的状态。其余调用方一律用下面那个带版本比对的。
+ */
+export async function usernameFromToken(jwt: JwtVerifier, token: string | undefined) {
+  if (!token)
+    return
+
+  return readClaims(await jwt.verify(token))?.username
+}
+
+/**
+ * 验签 + 比对 token 版本，这才是「这个凭据现在还有效吗」的完整答案。
+ *
+ * 版本不等有两种来源：用户登出过（`bumpTokenVersion`），或者 token 是在引入这一列
+ * **之前**签发的（那时 payload 里根本没有 `ver`）。后者意味着上线后所有人需要重新
+ * 登录一次 —— 这正是想要的，那些永久 token 之前在 URL 里流通过，一次冲干净最好。
+ */
+export async function usernameFromCredentials(
+  jwt: JwtVerifier,
+  credentials: Parameters<typeof readAuthToken>[0],
+) {
+  const token = readAuthToken(credentials)
+  if (!token)
+    return
+
+  const claims = readClaims(await jwt.verify(token))
+  if (!claims || claims.ver !== getTokenVersion(claims.username))
+    return
+
+  return claims.username
+}
+
+/** 从请求凭据解出 username；没有或无效则不返回任何东西。 */
+async function parseUsername({ headers, cookie, jwt }: Parameters<typeof usernameFromCredentials>[1] & { jwt: JwtVerifier }) {
+  const username = await usernameFromCredentials(jwt, { headers, cookie })
+  return username ? { username } : undefined
 }
 
 export const optionalAuth = new Elysia({ name: 'optional-auth' })

@@ -61,4 +61,5 @@ export interface RoomClient {
 
 export const roomNameBody = t.Object({ name: t.String({ minLength: 2, maxLength: 50 }) })
 
-export const wsQuery = t.Object({ token: t.String() })
+/** 凭据走 cookie（浏览器 `WebSocket` 设不了请求头），query 上没有东西要校验了。 */
+export const wsQuery = t.Object({})

@@ -1,7 +1,7 @@
 import type { OAuthSession } from '@atproto/oauth-client-node'
 import { Agent } from '@atproto/api'
 import { Elysia, t } from 'elysia'
-import { requireAuth } from '../auth/guard'
+import { requireAuth, usernameFromCredentials } from '../auth/guard'
 import { jwtPlugin } from '../jwt'
 import { backfillFromPds } from './backfill'
 import { getOAuthClient, isAtprotoConfigured, revokeSession, sweepExpiredStates } from './client'
@@ -12,7 +12,12 @@ import * as AtprotoService from './service'
 
 const SWEEP_INTERVAL_MS = 15 * 60 * 1000
 
-/** `?token=` 是既有约定（WS 也这么带），顶层跳转没法设 Authorization 头。 */
+/**
+ * 授权请求与回调之间的待办绑定，`state` 是键。
+ *
+ * 凭据**不在这里**：过去登录态靠 `?token=` 带过来，现在走 cookie（顶层跳转带得上，
+ * 见 `auth/cookie.ts`），所以这张表只存业务状态，不需要防泄漏。
+ */
 const pendingStates = new Map<string, { mode: 'bind', username: string, expiresAt: number }>()
 
 setInterval(sweepExpiredStates, SWEEP_INTERVAL_MS).unref?.()
@@ -64,7 +69,7 @@ export default new Elysia()
       },
     })
   })
-  .get('/atproto/oauth/login', async ({ query, jwt, status, redirect }) => {
+  .get('/atproto/oauth/login', async ({ query, jwt, headers, cookie, status, redirect }) => {
     if (!isAtprotoConfigured())
       return status(503, { message: 'atproto.notConfigured' })
 
@@ -72,15 +77,17 @@ export default new Elysia()
     if (query.mode && query.mode !== 'bind')
       return status(400, { message: 'atproto.loginNotEnabled' })
 
-    const payload = query.token ? await jwt.verify(query.token) : null
-    if (!payload || typeof payload.sub !== 'string')
+    // 凭据从 cookie 来。这里过去是 `?token=` —— 顶层跳转设不了请求头，只能那么带，
+    // 代价是这把凭据会经 `Referer` 和对方 access log 漏给 atproto 的授权服务器。
+    const username = await usernameFromCredentials(jwt, { headers, cookie })
+    if (!username)
       return status(401, { message: 'error.unauthorized' })
 
     const client = await getOAuthClient()
     const state = crypto.randomUUID()
     pendingStates.set(state, {
       mode: 'bind',
-      username: payload.sub,
+      username,
       expiresAt: Date.now() + 60 * 60 * 1000,
     })
 
@@ -95,7 +102,6 @@ export default new Elysia()
   }, {
     query: t.Object({
       handle: t.String({ minLength: 1 }),
-      token: t.Optional(t.String()),
       mode: t.Optional(t.String()),
     }),
   })

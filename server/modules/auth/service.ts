@@ -96,3 +96,26 @@ export function getCapabilities(username: string): Capability[] {
 export function userHasCapability(username: string, capability: Capability) {
   return hasCapability(getCapabilities(username), capability)
 }
+
+/** JWT 里 `ver` 要比对的那一列；用户不存在时返回 undefined（= 不一致）。 */
+export function getTokenVersion(username: string) {
+  return db
+    .select({ tokenVersion: users.tokenVersion })
+    .from(users)
+    .where(eq(users.username, username))
+    .get()
+    ?.tokenVersion
+}
+
+/**
+ * 登出：把版本号 +1，该用户**所有**已签发的 token 立刻失效。
+ *
+ * 这是「登出所有设备」的语义 —— 手机上点登出，桌面也会掉线。换按设备撤销要存会话表，
+ * 这里刻意没那么做。也正因为是单调递增的计数器，重复调用无害。
+ */
+export function bumpTokenVersion(username: string) {
+  db.update(users)
+    .set({ tokenVersion: sql`${users.tokenVersion} + 1` })
+    .where(eq(users.username, username))
+    .run()
+}

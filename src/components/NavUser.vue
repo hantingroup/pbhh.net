@@ -4,14 +4,24 @@ import { Inbox, LogOut, MessageCircle, Settings, ShieldCheck, User } from 'lucid
 import { useRouter } from 'vue-router'
 import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuSeparator, DropdownMenuTrigger } from '@/components/ui/dropdown-menu'
 import UserAvatar from '@/components/UserAvatar.vue'
-import { clearAuth, unreadCount, user } from '@/lib/api'
+import { api, clearAuth, unreadCount, user } from '@/lib/api'
 import { hasCapability } from '@/lib/capabilities'
 
 defineProps<UserProfile>()
 
 const router = useRouter()
 
-function logout() {
+async function logout() {
+  // 先让服务端作废凭据（`tokenVersion` +1，清 cookie），再清本地。
+  // 顺序不能反：凭据现在只存在于服务端下发的 httpOnly cookie 里，前端清不了它 ——
+  // 只调 `clearAuth()` 会留下一张仍然有效的 cookie，刷新一下又登回来了。
+  // 请求失败也照样往下走：本地状态必须清掉，否则界面会卡在「登出不了」。
+  try {
+    await api.logout.post()
+  }
+  catch {
+    // 忽略
+  }
   clearAuth()
   router.push('/login')
 }

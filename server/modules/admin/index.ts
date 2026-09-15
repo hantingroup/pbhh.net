@@ -2,9 +2,10 @@ import type { ElysiaWS } from 'elysia/ws'
 import type { AppEvent } from '../events/bus'
 import type { LogEntry } from './logger'
 import { Elysia, t } from 'elysia'
-import { requireAuth } from '../auth/guard'
+import { requireAuth, usernameFromCredentials } from '../auth/guard'
 import { userHasCapability } from '../auth/service'
 import { bus } from '../events/bus'
+import { jwtPlugin } from '../jwt'
 import { getLogDates, logBuffer, logListeners, readLogsByDate } from './logger'
 import { getUpdateStatus, runUpdateScript } from './updater'
 
@@ -15,6 +16,7 @@ const wsHandlers = new Map<ElysiaWS, {
 }>()
 
 export default new Elysia({ prefix: '/admin' })
+  .use(jwtPlugin)
   .use(requireAuth)
   .onBeforeHandle(({ username, status }) => {
     if (!userHasCapability(username, 'admin'))
@@ -29,8 +31,24 @@ export default new Elysia({ prefix: '/admin' })
     return readLogsByDate(params.date)
   })
   .ws('/ws', {
-    query: t.Object({ token: t.String() }),
-    open(ws) {
+    /**
+     * 凭据走 cookie，query 上没有东西要校验。
+     *
+     * 这里过去声明了 `query: t.Object({ token: t.String() })` 却**从没读过它** ——
+     * 全模块没有任何 `jwt.verify`。而浏览器 `WebSocket` 构造器设不了 `Authorization`
+     * 头，所以上面那条 `requireAuth` 在握手时无从满足：这个订阅要么一直被拒、
+     * 要么在 hook 不参与升级时完全敞开。现在像 events/room 那样在 `open` 里显式验。
+     */
+    query: t.Object({}),
+    async open(ws) {
+      // `requireAuth` 的 derive 是另一个实例的 scoped hook，在 `open` 里拿不到；
+      // 而且 `open` 原本就没有任何授权检查，这里必须自己判一次管理员。
+      const username = await usernameFromCredentials(ws.data.jwt, ws.data)
+      if (!username || !userHasCapability(username, 'admin')) {
+        ws.close()
+        return
+      }
+
       for (const entry of logBuffer)
         ws.send(JSON.stringify(entry))
       const logFn = (entry: LogEntry) => ws.send(JSON.stringify(entry))

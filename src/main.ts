@@ -59,9 +59,11 @@ router.beforeEach((to) => {
     return '/'
 })
 
-if (localStorage.getItem('token')) {
-  await fetchUser()
-  await fetchUnreadCount()
-}
+// 凭据是 httpOnly cookie，前端读不到，所以「有没有登录」只能问服务端 ——
+// 不能再拿本地有没有 token 来给这次请求设闸。无事可做的代价是一次 401。
+// 有 `guestOnly` / `authRequired` 路由，必须等它落定再 mount，否则首屏会误判成未登录。
+localStorage.removeItem('token') // 一次性清掉旧版本留在这里的凭据
+await fetchUser()
+await fetchUnreadCount()
 
 createApp(App).use(router).use(i18n).mount('#app')

@@ -33,7 +33,13 @@ const updateSubmitting = ref(false)
 const updateError = ref('')
 const updateState = ref<UpdateStatus | null>(null)
 
-const authHeaders = computed(() => ({ Authorization: `Bearer ${localStorage.getItem('token') ?? ''}` }))
+/**
+ * 生产环境 API 在另一个子域，凭据是 cookie 而不是请求头。
+ * `credentials: 'include'` 两个方向都要：不带它，浏览器既不会发出 cookie，
+ * 也不会收下响应里的 `Set-Cookie`。
+ */
+const credentials = { credentials: 'include' } as const
+
 const displayLogs = computed(() => selectedDate.value ? historyLogs.value : backendLogs.value)
 const totalLogPages = computed(() => Math.max(1, Math.ceil(displayLogs.value.length / LOG_PAGE_SIZE)))
 const pagedLogs = computed(() => displayLogs.value.slice(logPage.value * LOG_PAGE_SIZE, (logPage.value + 1) * LOG_PAGE_SIZE))
@@ -103,7 +109,7 @@ function applyUpdateState(payload: unknown) {
 }
 
 async function loadLogDates() {
-  const res = await fetch(`${API_BASE}/admin/log-dates`, { headers: authHeaders.value })
+  const res = await fetch(`${API_BASE}/admin/log-dates`, credentials)
   if (res.ok)
     logDates.value = await res.json()
 }
@@ -113,7 +119,7 @@ async function loadHistoryLogs(date: string) {
   historyLogs.value = []
   logPage.value = 0
 
-  const res = await fetch(`${API_BASE}/admin/logs/${date}`, { headers: authHeaders.value })
+  const res = await fetch(`${API_BASE}/admin/logs/${date}`, credentials)
   if (res.ok)
     historyLogs.value = await res.json()
 
@@ -122,7 +128,7 @@ async function loadHistoryLogs(date: string) {
 }
 
 async function loadUpdateStatus() {
-  const res = await fetch(`${API_BASE}/admin/update`, { headers: authHeaders.value })
+  const res = await fetch(`${API_BASE}/admin/update`, credentials)
   if (!res.ok)
     return
 
@@ -144,7 +150,7 @@ async function runUpdate() {
   try {
     const res = await fetch(`${API_BASE}/admin/update`, {
       method: 'POST',
-      headers: authHeaders.value,
+      ...credentials,
     })
     const body = await res.json().catch(() => ({}))
 
@@ -222,9 +228,9 @@ watch(() => updateState.value?.running, async (running, previous) => {
 }, { immediate: true })
 
 function connectWS() {
-  const token = localStorage.getItem('token') ?? ''
-
-  ws = new WebSocket(`${API_BASE.replace(/^http/, 'ws')}/admin/ws?token=${encodeURIComponent(token)}`)
+  // 凭据走 cookie —— `WebSocket` 构造器设不了 `Authorization` 头，这正是它以前
+  // 不得不把 token 塞进 query 的原因。
+  ws = new WebSocket(`${API_BASE.replace(/^http/, 'ws')}/admin/ws`)
   ws.onmessage = ({ data }) => {
     try {
       const parsed = JSON.parse(data)
