@@ -10,14 +10,17 @@
     "dev:server": "npm run --prefix server dev",
     "build": "vue-tsc && vite build",
     "preview": "vite preview",
-    "lint": "eslint .",
-    "lint:fix": "eslint . --fix"
+    "lint": "eslint . && bun scripts/check-lexicons.ts",
+    "lint:fix": "eslint . --fix",
+    "check:lexicons": "bun scripts/check-lexicons.ts"
   },
   "workspaces": [
     ".",
     "server"
   ],
   "dependencies": {
+    "@atproto/api": "^0.20.44",
+    "@atproto/lexicon": "^0.7.14",
     "@elysiajs/eden": "^1.4.8",
     "@sinclair/typebox": "^0.34.48",
     "@types/gravatar": "^1.8.6",
