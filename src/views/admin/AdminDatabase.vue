@@ -1,365 +1,125 @@
-<!-- eslint-disable no-alert -->
 <script setup lang="ts">
-import { ChevronDown, Eye, EyeOff } from 'lucide-vue-next'
-import { computed, onMounted, ref, watch, watchEffect } from 'vue'
+import { computed, onMounted, onUnmounted, ref } from 'vue'
 import { Button } from '@/components/ui/button'
-import { DropdownMenu, DropdownMenuContent, DropdownMenuRadioGroup, DropdownMenuRadioItem, DropdownMenuTrigger } from '@/components/ui/dropdown-menu'
 import { Spinner } from '@/components/ui/spinner'
-import { API_BASE } from '@/lib/api'
 
-type Row = Record<string, unknown>
+interface StudioStatus {
+  ready: boolean
+  status: 'idle' | 'starting' | 'running' | 'failed'
+  pid: number | null
+  lastOutput: string[]
+  error: string | null
+}
 
-const props = defineProps<{
-  canEdit: boolean
-}>()
+/**
+ * 刻意用同源相对路径而不是 API_BASE：这里挂的是一个 iframe，里面跑的是打过补丁的
+ * studio 前端，它请求的是**页面自己这个源**上的 `/api/admin/studio/api`（补丁把
+ * 上游写死的 `local.drizzle.studio` 换成了这个相对路径）。两个环境都会把 `/api`
+ * 前缀转给服务端（nginx 与 vite proxy 都是剥掉前缀转发）。
+ *
+ * 凭据不用管：会话是 cookie，同源请求默认就带。这也是这里一次 `credentials`
+ * 都不需要写的原因 —— 以前要靠 `POST /session` 换一张同源 cookie，现在不必了。
+ */
+const BASE = '/api/admin/studio'
+const READY_TIMEOUT_MS = 120_000
+const POLL_INTERVAL_MS = 1000
 
-const tables = ref<string[]>([])
-const selectedTable = ref('')
-const tableRows = ref<Row[]>([])
-const tablePks = ref<string[]>([])
-const loadingTable = ref(false)
+const status = ref<StudioStatus | null>(null)
+const error = ref('')
+const showStudio = ref(false)
 
-const editingIndex = ref<number | null>(null)
-const editDraft = ref<Row>({})
-const insertDraft = ref<Row | null>(null)
+let timer: ReturnType<typeof setInterval> | null = null
+let deadline = 0
 
-const DB_PAGE_SIZE = 500
-const dbPage = ref(0)
-const totalDbPages = computed(() => Math.max(1, Math.ceil(tableRows.value.length / DB_PAGE_SIZE)))
-const pagedRows = computed(() => tableRows.value.slice(dbPage.value * DB_PAGE_SIZE, (dbPage.value + 1) * DB_PAGE_SIZE))
-
-watchEffect(() => {
-  if (dbPage.value >= totalDbPages.value)
-    dbPage.value = totalDbPages.value - 1
+const headline = computed(() => {
+  if (error.value)
+    return error.value
+  if (status.value?.status === 'failed')
+    return status.value.error ?? 'Drizzle Studio 启动失败'
+  if (status.value?.status === 'starting')
+    return '正在启动 Drizzle Studio…'
+  return '正在连接 Drizzle Studio…'
 })
 
-watch(dbPage, () => {
-  editingIndex.value = null
-  insertDraft.value = null
-})
-
-const tableColumns = computed(() =>
-  tableRows.value[0]
-    ? Object.keys(tableRows.value[0])
-    : insertDraft.value
-      ? Object.keys(insertDraft.value)
-      : [],
-)
-
-// ── Password column hiding ────────────────────────────────────────────────────
-const PASSWORD_PATTERN = /password|passwd|secret/i
-const hiddenCols = ref<Set<string>>(new Set())
-
-watch(tableColumns, (cols) => {
-  hiddenCols.value = new Set(cols.filter(col => PASSWORD_PATTERN.test(col)))
-}, { immediate: true })
-
-function toggleColVisibility(col: string) {
-  const next = new Set(hiddenCols.value)
-  if (next.has(col))
-    next.delete(col)
-  else
-    next.add(col)
-  hiddenCols.value = next
-}
-
-// ── Auth ──────────────────────────────────────────────────────────────────────
-const authHeaders = computed(() => ({
-  Authorization: `Bearer ${localStorage.getItem('token') ?? ''}`,
-}))
-
-async function loadTables() {
-  const res = await fetch(`${API_BASE}/admin/tables`, { headers: authHeaders.value })
-  if (res.ok) {
-    tables.value = await res.json()
-    if (tables.value.length)
-      selectedTable.value = tables.value[0]!
+function stopPolling() {
+  if (timer) {
+    clearInterval(timer)
+    timer = null
   }
 }
 
-async function loadTable() {
-  if (!selectedTable.value)
-    return
-  editingIndex.value = null
-  insertDraft.value = null
-  dbPage.value = 0
-  loadingTable.value = true
-  const res = await fetch(`${API_BASE}/admin/db/${selectedTable.value}`, { headers: authHeaders.value })
-  if (res.ok) {
-    const data = await res.json()
-    tableRows.value = data.rows
-    tablePks.value = data.pks ?? []
+function poll(): Promise<'ready' | 'pending' | 'stop'> {
+  if (Date.now() > deadline) {
+    error.value = status.value?.error ?? 'Drizzle Studio 启动超时'
+    return Promise.resolve('stop')
   }
-  loadingTable.value = false
+
+  return fetch(`${BASE}/status`)
+    .then(async (res) => {
+      if (!res.ok) {
+        error.value = '无法获取 Drizzle Studio 状态'
+        return 'stop' as const
+      }
+      status.value = await res.json()
+      if (status.value?.ready) {
+        showStudio.value = true
+        return 'ready' as const
+      }
+      return 'pending' as const
+    })
+    .catch(() => {
+      error.value = '无法获取 Drizzle Studio 状态'
+      return 'stop' as const
+    })
 }
 
-watch(selectedTable, loadTable)
+async function start() {
+  stopPolling()
+  error.value = ''
+  status.value = null
+  showStudio.value = false
+  deadline = Date.now() + READY_TIMEOUT_MS
 
-// ── Delete ────────────────────────────────────────────────────────────────────
-async function deleteRow(row: Row) {
-  if (!props.canEdit)
-    return
-  if (!tablePks.value.length)
-    return
-  if (!window.confirm('确认删除这条记录？'))
-    return
-  const pk: Row = {}
-  for (const col of tablePks.value) pk[col] = row[col]
-  const res = await fetch(`${API_BASE}/admin/db/${selectedTable.value}`, {
-    method: 'DELETE',
-    headers: { ...authHeaders.value, 'Content-Type': 'application/json' },
-    body: JSON.stringify(pk),
-  })
-  if (res.ok)
-    tableRows.value = tableRows.value.filter(r => !tablePks.value.every(col => r[col] === row[col]))
-}
-
-// ── Edit ──────────────────────────────────────────────────────────────────────
-function startEdit(localIndex: number) {
-  if (!props.canEdit)
-    return
-  const globalIndex = dbPage.value * DB_PAGE_SIZE + localIndex
-  editingIndex.value = globalIndex
-  editDraft.value = { ...tableRows.value[globalIndex] }
-  insertDraft.value = null
-}
-
-function cancelEdit() {
-  editingIndex.value = null
-}
-
-async function saveEdit(row: Row) {
-  if (!props.canEdit)
-    return
-  const pk: Row = {}
-  for (const col of tablePks.value) pk[col] = row[col]
-  const values: Row = {}
-  for (const col of tableColumns.value) {
-    if (!tablePks.value.includes(col))
-      values[col] = editDraft.value[col]
-  }
-  const res = await fetch(`${API_BASE}/admin/db/${selectedTable.value}`, {
-    method: 'PATCH',
-    headers: { ...authHeaders.value, 'Content-Type': 'application/json' },
-    body: JSON.stringify({ pk, values }),
-  })
-  if (res.ok) {
-    tableRows.value[editingIndex.value!] = { ...row, ...values }
-    editingIndex.value = null
+  // 凭据就是会话 cookie 本身，同源请求自己会带上 —— `/status` 顺便会催一下
+  // drizzle-kit studio 启动，所以这一次调用同时是「探活」和「拉起」。
+  if (await poll() === 'pending') {
+    timer = setInterval(async () => {
+      if (await poll() !== 'pending')
+        stopPolling()
+    }, POLL_INTERVAL_MS)
   }
 }
 
-// ── Insert ────────────────────────────────────────────────────────────────────
-function startInsert() {
-  if (!props.canEdit)
-    return
-  const template: Row = {}
-  const cols = tableRows.value[0] ? Object.keys(tableRows.value[0]) : tablePks.value
-  for (const col of cols) template[col] = ''
-  insertDraft.value = template
-  editingIndex.value = null
-}
-
-function cancelInsert() {
-  insertDraft.value = null
-}
-
-async function saveInsert() {
-  if (!props.canEdit || !insertDraft.value)
-    return
-  const res = await fetch(`${API_BASE}/admin/db/${selectedTable.value}`, {
-    method: 'POST',
-    headers: { ...authHeaders.value, 'Content-Type': 'application/json' },
-    body: JSON.stringify(insertDraft.value),
-  })
-  if (res.ok) {
-    insertDraft.value = null
-    await loadTable()
-  }
-}
-
-type ColType = 'boolean' | 'number' | 'text'
-
-function colType(col: string): ColType {
-  const sample = tableRows.value[0]?.[col]
-  if (typeof sample === 'boolean')
-    return 'boolean'
-  if (typeof sample === 'number')
-    return 'number'
-  return 'text'
-}
-
-function cellValue(v: unknown) {
-  if (v === null || v === undefined)
-    return '—'
-  if (typeof v === 'object')
-    return JSON.stringify(v)
-  return String(v)
-}
-
-onMounted(loadTables)
+onMounted(start)
+onUnmounted(stopPolling)
 </script>
 
 <template>
   <div class="flex-1 min-h-0 flex flex-col overflow-hidden">
-    <div class="flex items-center gap-2 px-4 py-2 border-b shrink-0 flex-wrap">
-      <DropdownMenu>
-        <DropdownMenuTrigger as-child>
-          <Button variant="outline" class="shrink-0 gap-1">
-            {{ selectedTable }}
-            <ChevronDown class="size-4" />
+    <iframe
+      v-if="showStudio"
+      :src="`${BASE}/ui/`"
+      class="flex-1 w-full min-h-0 bg-background"
+      title="Drizzle Studio"
+    />
+
+    <div v-else class="flex-1 min-h-0 flex items-center justify-center p-6 overflow-auto">
+      <div class="w-full max-w-lg space-y-3">
+        <div class="flex items-center justify-center gap-2 text-sm text-muted-foreground">
+          <Spinner v-if="!error" />
+          <span>{{ headline }}</span>
+        </div>
+
+        <pre
+          v-if="!showStudio && status?.lastOutput?.length"
+          class="text-left text-xs bg-muted/40 rounded p-3 max-h-60 overflow-auto whitespace-pre-wrap break-all"
+        >{{ status.lastOutput.join('\n') }}</pre>
+
+        <div v-if="error" class="flex justify-center">
+          <Button variant="outline" size="sm" @click="start">
+            重试
           </Button>
-        </DropdownMenuTrigger>
-        <DropdownMenuContent>
-          <DropdownMenuRadioGroup v-model="selectedTable">
-            <DropdownMenuRadioItem
-              v-for="table in tables"
-              :key="table" :value="table"
-            >
-              {{ table }}
-            </DropdownMenuRadioItem>
-          </DropdownMenuRadioGroup>
-        </DropdownMenuContent>
-      </DropdownMenu>
-      <Button size="sm" variant="outline" :disabled="loadingTable" @click="loadTable">
-        <Spinner v-if="loadingTable" data-icon="inline-start" />
-        刷新
-      </Button>
-      <Button v-if="canEdit" size="sm" variant="outline" @click="startInsert">
-        + 新增
-      </Button>
-      <span class="text-xs text-muted-foreground">{{ tableRows.length }} 条</span>
-      <div v-if="totalDbPages > 1" class="flex items-center gap-1 shrink-0">
-        <Button variant="ghost" size="sm" :disabled="dbPage === 0" @click="dbPage--">‹</Button>
-        <span class="text-xs text-muted-foreground">{{ dbPage + 1 }}/{{ totalDbPages }}</span>
-        <Button variant="ghost" size="sm" :disabled="dbPage >= totalDbPages - 1" @click="dbPage++">›</Button>
-      </div>
-    </div>
-
-    <div class="flex-1 min-h-0 overflow-auto">
-      <table class="text-xs border-collapse min-w-max w-full">
-        <thead class="sticky top-0 bg-background shadow-[0_1px_0_0_var(--border)]">
-          <tr>
-            <th
-              v-for="col in tableColumns"
-              :key="col"
-              class="text-left px-3 py-2 font-medium border-r whitespace-nowrap"
-              :class="tablePks.includes(col) ? 'text-primary' : 'text-muted-foreground'"
-            >
-              <span class="inline-flex items-center gap-1">
-                {{ col }}
-                <button
-                  v-if="PASSWORD_PATTERN.test(col)"
-                  class="opacity-50 hover:opacity-100"
-                  @click="toggleColVisibility(col)"
-                >
-                  <EyeOff v-if="hiddenCols.has(col)" class="size-3" />
-                  <Eye v-else class="size-3" />
-                </button>
-              </span>
-            </th>
-            <th v-if="canEdit" class="px-3 py-2 text-muted-foreground">
-              操作
-            </th>
-          </tr>
-        </thead>
-        <tbody>
-          <!-- Insert row -->
-          <tr v-if="insertDraft" class="border-b bg-muted/30">
-            <td v-for="col in tableColumns" :key="col" class="px-2 py-1 border-r">
-              <input
-                v-if="colType(col) === 'boolean'"
-                v-model="insertDraft[col] as boolean"
-                type="checkbox"
-                class="cursor-pointer block mx-auto"
-              >
-              <input
-                v-else-if="colType(col) === 'number' || hiddenCols.has(col)"
-                v-model="insertDraft[col] as string"
-                :type="colType(col) === 'number' ? 'number' : 'password'"
-                class="w-full bg-transparent border border-input rounded px-1.5 py-0.5 outline-none focus:ring-1 focus:ring-ring"
-              >
-              <textarea
-                v-else
-                v-model="insertDraft[col] as string"
-                rows="2"
-                class="w-full bg-transparent border border-input rounded px-1.5 py-0.5 outline-none focus:ring-1 focus:ring-ring resize-y min-w-40"
-              />
-            </td>
-            <td v-if="canEdit" class="px-3 py-1.5 flex gap-3 items-center">
-              <button class="text-xs text-green-600 hover:text-green-800 font-medium" @click="saveInsert">
-                保存
-              </button>
-              <button class="text-xs text-muted-foreground hover:text-foreground" @click="cancelInsert">
-                取消
-              </button>
-            </td>
-          </tr>
-
-          <!-- Data rows -->
-          <tr
-            v-for="(row, i) in pagedRows"
-            :key="i"
-            class="border-b hover:bg-muted/50"
-            :class="{ 'bg-muted/20': editingIndex === dbPage * DB_PAGE_SIZE + i }"
-          >
-            <template v-if="editingIndex === dbPage * DB_PAGE_SIZE + i">
-              <td v-for="col in tableColumns" :key="col" class="px-2 py-1 border-r">
-                <template v-if="!tablePks.includes(col)">
-                  <input
-                    v-if="colType(col) === 'boolean'"
-                    v-model="editDraft[col] as boolean"
-                    type="checkbox"
-                    class="cursor-pointer block mx-auto"
-                  >
-                  <input
-                    v-else-if="colType(col) === 'number' || hiddenCols.has(col)"
-                    v-model="editDraft[col] as string"
-                    :type="colType(col) === 'number' ? 'number' : 'password'"
-                    class="w-full bg-transparent border border-input rounded px-1.5 py-0.5 outline-none focus:ring-1 focus:ring-ring"
-                  >
-                  <textarea
-                    v-else
-                    v-model="editDraft[col] as string"
-                    rows="2"
-                    class="w-full bg-transparent border border-input rounded px-1.5 py-0.5 outline-none focus:ring-1 focus:ring-ring resize-y min-w-40"
-                  />
-                </template>
-                <span v-else class="px-1 text-muted-foreground">{{ cellValue(row[col]) }}</span>
-              </td>
-              <td v-if="canEdit" class="px-3 py-1.5 flex gap-3 items-center">
-                <button class="text-xs text-green-600 hover:text-green-800 font-medium" @click="saveEdit(row)">
-                  保存
-                </button>
-                <button class="text-xs text-muted-foreground hover:text-foreground" @click="cancelEdit">
-                  取消
-                </button>
-              </td>
-            </template>
-            <template v-else>
-              <td
-                v-for="col in tableColumns"
-                :key="col"
-                class="px-3 py-1.5 border-r max-w-60 truncate font-mono"
-                :title="hiddenCols.has(col) ? '' : String(row[col] ?? '')"
-              >
-                <span v-if="hiddenCols.has(col)" class="tracking-widest text-muted-foreground">{{ '•'.repeat(12) }}</span>
-                <template v-else>{{ cellValue(row[col]) }}</template>
-              </td>
-              <td v-if="canEdit" class="px-3 py-1.5 flex gap-3 items-center">
-                <button class="text-xs text-blue-500 hover:text-blue-700" @click="startEdit(i)">
-                  编辑
-                </button>
-                <button v-if="tablePks.length" class="text-xs text-red-500 hover:text-red-700" @click="deleteRow(row)">
-                  删除
-                </button>
-              </td>
-            </template>
-          </tr>
-        </tbody>
-      </table>
-      <div v-if="tableRows.length === 0 && !loadingTable && !insertDraft" class="text-muted-foreground py-8 text-center text-sm">
-        暂无数据
+        </div>
       </div>
     </div>
   </div>

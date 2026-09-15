@@ -9,21 +9,16 @@ const router = useRouter()
 const route = useRoute()
 const canViewAdmin = computed(() => hasCapability(user.value?.capabilities, 'admin:view'))
 
-type Tab = 'backend' | 'studio' | 'database'
+type Tab = 'backend' | 'database'
 
 const tabs: Array<{ key: Tab, label: string, to: string }> = [
   { key: 'backend', label: '服务端日志', to: '/admin/log' },
-  { key: 'studio', label: 'Drizzle Studio', to: '/admin/studio' },
   { key: 'database', label: '数据库', to: '/admin/database' },
 ]
 
-const currentTab = computed<Tab>(() => {
-  if (route.path === '/admin/studio')
-    return 'studio'
-  if (route.path === '/admin/database')
-    return 'database'
-  return 'backend'
-})
+const currentTab = computed<Tab>(() =>
+  route.path === '/admin/database' ? 'database' : 'backend',
+)
 
 onMounted(() => {
   if (!canViewAdmin.value)
