@@ -13,10 +13,11 @@ export const logBuffer: LogEntry[] = []
 export const logListeners = new Set<(entry: LogEntry) => void>()
 
 const dataDir = resolve(import.meta.dir, '../../../data')
+const logsDir = resolve(dataDir, 'logs')
 
 function getLogFile() {
   const date = new Date().toISOString().slice(0, 10)
-  return resolve(dataDir, 'logs', `${date}.log`)
+  return resolve(logsDir, `${date}.log`)
 }
 
 // Load existing logs from today's file on startup
@@ -47,8 +48,11 @@ function capture(level: LogEntry['level'], origin: (...args: unknown[]) => void)
     for (const fn of logListeners)
       fn(entry)
     try {
-      if (!existsSync(dataDir))
-        mkdirSync(dataDir, { recursive: true })
+      // Create the directory actually written to. This used to create `dataDir` while
+      // writing to `logs/` under it, so the missing subdirectory threw ENOENT into the
+      // catch below: the live tail worked, history was silently always empty.
+      if (!existsSync(logsDir))
+        mkdirSync(logsDir, { recursive: true })
       appendFileSync(getLogFile(), `${JSON.stringify(entry)}\n`)
     }
     catch {}
@@ -63,17 +67,19 @@ console.warn = capture('warn', console.warn.bind(console))
 console.error = capture('error', console.error.bind(console))
 
 export function getLogDates(): string[] {
-  if (!existsSync(dataDir))
+  // Used to scan `dataDir` for `server-*.log` — the old directory *and* the old naming,
+  // so it always returned empty and the history page never offered a date.
+  if (!existsSync(logsDir))
     return []
-  return readdirSync(dataDir)
-    .filter(f => /^server-\d{4}-\d{2}-\d{2}\.log$/.test(f))
-    .map(f => f.slice(7, 17))
+  return readdirSync(logsDir)
+    .filter(f => /^\d{4}-\d{2}-\d{2}\.log$/.test(f))
+    .map(f => f.slice(0, 10))
     .sort()
     .reverse()
 }
 
 export function readLogsByDate(date: string): LogEntry[] {
-  const file = resolve(dataDir, 'logs', `${date}.log`)
+  const file = resolve(logsDir, `${date}.log`)
   if (!existsSync(file))
     return []
   try {
