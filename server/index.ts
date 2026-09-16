@@ -1,10 +1,13 @@
 import { cors } from '@elysiajs/cors'
 import { Elysia } from 'elysia'
+import { noteOrigin } from './modules/cors'
 import { mailServer } from './modules/mail/server'
 import './modules/admin/logger'
 
 const app = new Elysia()
-  .use(cors())
+  // A single function (not an array) becomes `origins: [fn]`, reflected on match —
+  // same as the default `origin: true`, plus the warn.
+  .use(cors({ origin: noteOrigin }))
   .use(import('./modules/auth'))
   .use(import('./modules/events'))
   .use(import('./modules/notification'))
