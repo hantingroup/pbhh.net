@@ -1,0 +1,38 @@
+diff --git a/lib/smtp-connection.js b/lib/smtp-connection.js
+index 410d6ed062df450707b60a5923b58d22beb02d45..c1b1cc638adf25609a1e9884cefb6c3d0b342125 100644
+--- a/lib/smtp-connection.js
++++ b/lib/smtp-connection.js
+@@ -384,7 +384,17 @@ class SMTPConnection extends EventEmitter {
+         }
+ 
+         if (this._socket && !this._socket.destroyed && this._socket.readyState === 'open') {
+-            this._socket.write(payload + '\r\n');
++            // NOTE(pbhh.net local patch): Bun throws ERR_SOCKET_CLOSED synchronously from
++            // write() when the peer is already gone, even though the guard above just
++            // passed -- its readyState/destroyed flags lag the real handle. Uncaught, that
++            // throw escapes the socket timeout callback and takes the whole process down.
++            // console.warn rather than this._server.logger: that logger is a no-op vanity
++            // logger unless the `logger` option is set, so a warning there never surfaces.
++            try {
++                this._socket.write(payload + '\r\n');
++            } catch (err) {
++                console.warn(`[mail] peer gone, dropping response for ${this.remoteAddress}: ${(err && err.code) || err}`);
++            }
+             this._server.logger.debug(
+                 {
+                     tnx: 'send',
+@@ -406,7 +416,13 @@ class SMTPConnection extends EventEmitter {
+      */
+     close() {
+         if (!this._socket.destroyed && this._socket.writable) {
+-            this._socket.end();
++            // NOTE(pbhh.net local patch): same race as send() -- the flags lag the handle.
++            // Without this, fixing the write above would only move the crash here.
++            try {
++                this._socket.end();
++            } catch {
++                // The peer is already gone; there is nothing left to shut down.
++            }
+         }
+ 
+         this._server.connections.delete(this);
