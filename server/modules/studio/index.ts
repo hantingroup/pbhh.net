@@ -24,7 +24,11 @@ import { readStudioAsset } from './ui'
 
 export default new Elysia({ prefix: '/admin/studio' })
   .use(jwtPlugin)
-  .derive({ as: 'scoped' }, async ({ headers, cookie, jwt }) => {
+  // These hooks must stay **local**, not `as: 'scoped'`. This instance has routes of its
+  // own, so local hooks cover exactly them. Scoped would copy them one level up — onto
+  // the root app in `index.ts`, which holds every module's routes, so the guard would
+  // reject every request on the server: 401 anonymous, 403 for any non-admin user.
+  .derive(async ({ headers, cookie, jwt }) => {
     try {
       return { studioUser: await usernameFromCredentials(jwt, { headers, cookie }) }
     }
@@ -33,7 +37,7 @@ export default new Elysia({ prefix: '/admin/studio' })
       return { studioUser: undefined }
     }
   })
-  .onBeforeHandle({ as: 'scoped' }, ({ studioUser, status }) => {
+  .onBeforeHandle(({ studioUser, status }) => {
     if (!studioUser)
       return status(401, { message: 'error.unauthorized' })
     if (!userHasCapability(studioUser, 'admin'))
