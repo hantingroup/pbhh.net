@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import type { UserProfile } from 'server/modules/auth/model'
-import { Inbox, LogOut, MessageCircle, Settings, ShieldCheck, User } from 'lucide-vue-next'
+import { Inbox, LogOut, Settings, ShieldCheck, User } from 'lucide-vue-next'
 import { useRouter } from 'vue-router'
 import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuSeparator, DropdownMenuTrigger } from '@/components/ui/dropdown-menu'
 import UserAvatar from '@/components/UserAvatar.vue'
@@ -53,12 +53,6 @@ async function logout() {
         </RouterLink>
       </DropdownMenuItem>
       <DropdownMenuItem as-child>
-        <RouterLink to="/rooms" class="flex items-center gap-2 cursor-pointer">
-          <MessageCircle class="size-4" />
-          {{ $t('room.title') }}
-        </RouterLink>
-      </DropdownMenuItem>
-      <DropdownMenuItem as-child>
         <RouterLink to="/settings" class="flex items-center gap-2 cursor-pointer">
           <Settings class="size-4" />
           {{ $t('nav.settings') }}
@@ -67,7 +61,7 @@ async function logout() {
       <DropdownMenuItem v-if="hasCapability(user?.capabilities, 'admin:view')" as-child>
         <RouterLink to="/admin" class="flex items-center gap-2 cursor-pointer">
           <ShieldCheck class="size-4" />
-          管理后台
+          Admin
         </RouterLink>
       </DropdownMenuItem>
       <DropdownMenuSeparator />
