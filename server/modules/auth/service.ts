@@ -1,6 +1,6 @@
 import type { Capability, SignUpBody, UpdateProfileBody, UserProfile } from './model'
 import bcrypt from 'bcryptjs'
-import { eq, sql } from 'drizzle-orm'
+import { count, eq, sql } from 'drizzle-orm'
 import { db, userCapabilities, users } from 'server/database'
 import { RESERVED_LABELS } from '../atproto/config'
 import { hasCapability } from './capability'
@@ -39,18 +39,25 @@ export async function create({ username, nickname, password }: SignUpBody): Prom
   if (existing)
     return { ok: false, reason: 'taken' }
 
+  const passwordHash = await bcrypt.hash(password, 8)
+
+  let firstUser = false
   try {
-    db.insert(users).values({
-      username,
-      nickname,
-      password: await bcrypt.hash(password, 8),
-    }).run()
+    // The first signup bootstraps the admin — a fresh DB (local dev, new deploy)
+    // shouldn't need a hand-written row. Nothing awaits between count and insert,
+    // so bun's single thread can't interleave another signup in between.
+    firstUser = db.select({ n: count() }).from(users).get()!.n === 0
+    db.insert(users).values({ username, nickname, password: passwordHash }).run()
   }
   catch {
     // 预检与插入之间仍有并发窗口，唯一索引是最终防线。没有这个 catch 的话上面
     // 那行会抛未捕获的 SqliteError，前端拿到 500 而不是「用户名已存在」。
     return { ok: false, reason: 'taken' }
   }
+
+  if (firstUser)
+    db.insert(userCapabilities).values({ username, capability: 'admin' }).run()
+
   return { ok: true, username }
 }
 
