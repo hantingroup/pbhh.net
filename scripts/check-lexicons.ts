@@ -67,7 +67,7 @@ function checkKeys(node: unknown, where: string, problems: string[]): void {
     return
   const obj = node as Record<string, unknown>
   if (obj.type === 'record' && !KEY_PATTERN.test(String(obj.key ?? '')))
-    problems.push(`${where}: key "${obj.key}" 不是 tid/nsid/any/literal:<值>`)
+    problems.push(`${where}: key "${obj.key}" is not tid/nsid/any/literal:<value>`)
   for (const [key, value] of Object.entries(obj)) checkKeys(value, `${where}.${key}`, problems)
 }
 
@@ -78,7 +78,7 @@ function report(file: string, problems: string[]): void {
 
 const files = (await readdir(DIR)).filter(f => f.endsWith('.json')).sort()
 if (files.length === 0) {
-  console.error(`lexicons/ 下没有 .json：${DIR}`)
+  console.error(`no .json files under lexicons/: ${DIR}`)
   process.exit(1)
 }
 
@@ -92,14 +92,14 @@ for (const file of files) {
   const parsed = lexiconDoc.safeParse(raw)
   if (!parsed.success) {
     failed = true
-    report(file, [`lexiconDoc 不通过：${parsed.error.issues.map(i => `${i.path.join('.')} ${i.message}`).join('; ')}`])
+    report(file, [`lexiconDoc rejected: ${parsed.error.issues.map(i => `${i.path.join('.')} ${i.message}`).join('; ')}`])
     continue
   }
 
   const id = parsed.data.id
   const problems: string[] = []
   if (basename(file, '.json') !== id)
-    problems.push(`文件名与 id 不一致：文件叫 ${basename(file, '.json')}，文档是 ${id}`)
+    problems.push(`filename does not match id: file is ${basename(file, '.json')}, document is ${id}`)
   checkKeys(parsed.data, id, problems)
 
   // `add()` 会把 ref 改写成全限定形式，所以解析要在它之后 —— 实际校验的是 add 自己
@@ -107,7 +107,7 @@ for (const file of files) {
   lexicons.add(parsed.data)
   for (const ref of collectRefs(parsed.data)) {
     if (!lexicons.getDef(ref))
-      problems.push(`ref 解析不到：${ref}`)
+      problems.push(`unresolved ref: ${ref}`)
   }
 
   if (problems.length) {
@@ -116,7 +116,7 @@ for (const file of files) {
     continue
   }
 
-  console.log(`✓ ${id}\n    DNS TXT  ${txtName(id)}  →  did=<发布账号的 DID>`)
+  console.log(`✓ ${id}\n    DNS TXT  ${txtName(id)}  →  did=<publisher account DID>`)
 }
 
 process.exit(failed ? 1 : 0)

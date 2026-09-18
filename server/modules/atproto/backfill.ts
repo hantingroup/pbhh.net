@@ -115,7 +115,7 @@ export async function backfillFromPds(did: string, opts?: BackfillOptions): Prom
       }
     })
 
-    console.info(`[atproto] 回填 ${did}：拉到 ${records.length} 条，新增 ${outcomes.length} 条`)
+    console.info(`[atproto] backfill ${did}: fetched ${records.length} records, added ${outcomes.length}`)
 
     if (!opts?.publish || !outcomes.length)
       return
@@ -123,10 +123,10 @@ export async function backfillFromPds(did: string, opts?: BackfillOptions): Prom
     // 补发放在事务**之外**，与实时流一致：事务里发会在回滚时留下幽灵事件。
     const { published, suppressed } = publishResynced(outcomes)
     if (published || suppressed)
-      console.info(`[atproto] 重同步 ${did}：补发 ${published} 条事件，${suppressed} 条超出 ${PUBLISH_MAX_AGE_MS / 86400000} 天窗口、静默入库`)
+      console.info(`[atproto] resync ${did}: republished ${published} events, ${suppressed} older than the ${PUBLISH_MAX_AGE_MS / 86400000}-day window stored silently`)
   }
   catch (err) {
     // 回填是锦上添花：失败绝不能影响绑定本身，也不该让用户看到报错。
-    console.error(`[atproto] 回填失败 ${did}:`, err)
+    console.error(`[atproto] backfill failed ${did}:`, err)
   }
 }

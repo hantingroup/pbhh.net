@@ -141,7 +141,7 @@ const POINT_TO_POINT_PREFIX = 'net.pbhh.notify.'
 
 bus.on('event', (event: AppEvent) => {
   if (event.topic.startsWith(POINT_TO_POINT_PREFIX)) {
-    console.error(`[events] 点对点话题 ${event.topic} 出现在总线上，已丢弃（应改用 deliverToUser）`)
+    console.error(`[events] point-to-point topic ${event.topic} showed up on the bus, dropped (use deliverToUser)`)
     return
   }
 

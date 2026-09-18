@@ -214,14 +214,14 @@ type BuiltRecord =
 function buildRecord(post: PostRefRow & { content: string, createdAt: Date }): BuiltRecord {
   const text = post.content
   if (!text.trim())
-    return { ok: false, code: 'emptyText', reason: '正文为空' }
+    return { ok: false, code: 'emptyText', reason: 'empty text' }
 
   const rich = new RichText({ text })
   if (rich.graphemeLength > MAX_GRAPHEMES) {
     return {
       ok: false,
       code: 'tooLong',
-      reason: `正文 ${rich.graphemeLength} 字素，超过 Bluesky 的 ${MAX_GRAPHEMES} 字素上限（不截断，见模块说明）`,
+      reason: `text is ${rich.graphemeLength} graphemes, over Bluesky's ${MAX_GRAPHEMES} limit (no truncation, see module notes)`,
     }
   }
 
@@ -270,13 +270,13 @@ function attachReply(record: Record<string, unknown>, parentId: number | null): 
       return {
         ok: false,
         permanent: true,
-        reason: `父帖 #${refs.postId} 不在 Bluesky 上（没有 atproto_uri），回复锚不住`,
+        reason: `parent post #${refs.postId} is not on Bluesky (no atproto_uri), the reply cannot be anchored`,
       }
     case 'pending':
       return {
         ok: false,
         permanent: false,
-        reason: `父帖 #${refs.postId} 还没有 cid（投递中），稍后重试`,
+        reason: `parent post #${refs.postId} has no cid yet (still being delivered), will retry`,
       }
   }
 }
@@ -330,7 +330,7 @@ export function mirrorLocalPost(input: { username: string, postId: number }): Mi
 
   const built = buildRecord(post)
   if (!built.ok) {
-    console.warn(`[outbox] 帖 #${post.id} 不发送：${built.reason}`)
+    console.warn(`[outbox] post #${post.id} not sent: ${built.reason}`)
     return { ok: false, reason: built.code }
   }
 
@@ -344,7 +344,7 @@ export function mirrorLocalPost(input: { username: string, postId: number }): Mi
       record = withReply.record
     }
     else if (withReply.permanent) {
-      console.warn(`[outbox] 回复 #${post.id} 不发送：${withReply.reason}`)
+      console.warn(`[outbox] reply #${post.id} not sent: ${withReply.reason}`)
       return { ok: false, reason: 'parentUnpublished' }
     }
   }
@@ -553,7 +553,7 @@ export function backfillLocalPosts(username: string): BackfillPostsResult {
       }
       catch (err) {
         failed++
-        console.error(`[outbox] 回填 帖 #${postId} 出错:`, err)
+        console.error(`[outbox] backfilling post #${postId} failed:`, err)
       }
     }
 
@@ -563,7 +563,7 @@ export function backfillLocalPosts(username: string): BackfillPostsResult {
     // 走到这里说明连候选查询都失败了。**必须兜住**：自动入口是在 OAuth 回调里跑的，
     // 那里抛出去会把「绑定成功」变成一个 500，而用户其实已经绑好了。与 `backfillFromPds`
     // 同策（见它的注释）。
-    console.error('[outbox] 回填本地帖失败:', err)
+    console.error('[outbox] backfilling local posts failed:', err)
     return { status: 'error' }
   }
 }
@@ -797,13 +797,13 @@ function succeed(row: OutboxRow, cid: string | null): void {
       tx.update(posts).set({ atprotoCid: cid }).where(eq(posts.atprotoUri, row.uri)).run()
     tx.delete(atprotoOutbox).where(eq(atprotoOutbox.id, row.id)).run()
   })
-  console.info(`[outbox] 已投递 ${row.kind} ${row.uri}`)
+  console.info(`[outbox] delivered ${row.kind} ${row.uri}`)
 }
 
 /** 这一行没有意义了（帖子已在本地删掉），直接丢弃。 */
 function drop(row: OutboxRow, reason: string): void {
   db.delete(atprotoOutbox).where(eq(atprotoOutbox.id, row.id)).run()
-  console.info(`[outbox] 丢弃 ${row.kind} ${row.uri}：${reason}`)
+  console.info(`[outbox] dropped ${row.kind} ${row.uri}: ${reason}`)
 }
 
 /**
@@ -828,10 +828,10 @@ function fail(row: OutboxRow, err: unknown, permanent = false): void {
     .run()
 
   if (dead) {
-    console.error(`[outbox] ${row.kind} ${row.uri} 失败 ${attempts} 次，标记为 dead（行保留供排查）:`, err)
+    console.error(`[outbox] ${row.kind} ${row.uri} failed ${attempts} times, marked dead (row kept for inspection):`, err)
     return
   }
-  console.warn(`[outbox] ${row.kind} ${row.uri} 第 ${attempts} 次失败，${Math.round(backoff / 1000)} 秒后重试:`, err)
+  console.warn(`[outbox] ${row.kind} ${row.uri} failed (attempt ${attempts}), retrying in ${Math.round(backoff / 1000)}s:`, err)
 }
 
 /**
@@ -847,7 +847,7 @@ async function deliver(row: OutboxRow): Promise<void> {
     await deliverLike(row, kind)
     return
   }
-  fail(row, new Error(`未知的 kind: ${row.kind}`), true)
+  fail(row, new Error(`unknown kind: ${row.kind}`), true)
 }
 
 async function deliverPost(row: OutboxRow, kind: 'put' | 'delete'): Promise<void> {
@@ -861,12 +861,12 @@ async function deliverPost(row: OutboxRow, kind: 'put' | 'delete'): Promise<void
     // 删掉的回复发出去、再发一条删除，等于无谓地把它短暂公开一次。delete 行不受此
     // 影响 —— 它本来就要发。
     if (!post || post.deleted) {
-      drop(row, '本地帖子已删除或不存在')
+      drop(row, 'local post deleted or missing')
       return
     }
 
     if (!row.record) {
-      fail(row, new Error('put 行没有 record'), true)
+      fail(row, new Error('put row has no record'), true)
       return
     }
 
@@ -878,7 +878,7 @@ async function deliverPost(row: OutboxRow, kind: 'put' | 'delete'): Promise<void
     }
 
     if (outboundMode() === 'dry') {
-      console.warn(`[outbox] 【干跑·未发送】putRecord ${POST_COLLECTION} ${row.uri} ${JSON.stringify(built.record)}`)
+      console.warn(`[outbox] [dry run, not sent] putRecord ${POST_COLLECTION} ${row.uri} ${JSON.stringify(built.record)}`)
       succeed(row, null)
       return
     }
@@ -895,7 +895,7 @@ async function deliverPost(row: OutboxRow, kind: 'put' | 'delete'): Promise<void
   }
 
   if (outboundMode() === 'dry') {
-    console.warn(`[outbox] 【干跑·未发送】deleteRecord ${POST_COLLECTION} ${row.uri}`)
+    console.warn(`[outbox] [dry run, not sent] deleteRecord ${POST_COLLECTION} ${row.uri}`)
     succeed(row, null)
     return
   }
@@ -981,23 +981,23 @@ async function deliverLike(row: OutboxRow, kind: 'put-like' | 'delete-like'): Pr
   if (kind === 'put-like') {
     const resolved = resolveLikeSubject(row.uri)
     if (resolved.kind === 'gone') {
-      drop(row, '本地赞已取消，或目标帖不在 Bluesky 上')
+      drop(row, 'local like removed, or the target post is not on Bluesky')
       return
     }
     // 非永久失败：给它退避，下个 tick 目标帖的 cid 可能就到位了。
     if (resolved.kind === 'pending') {
-      fail(row, new Error('目标帖的 cid 尚未就绪'), false)
+      fail(row, new Error('target post cid not ready yet'), false)
       return
     }
 
     const record = buildLikeRecord(row, resolved.subject)
     if (!record) {
-      fail(row, new Error('put-like 行没有 record'), true)
+      fail(row, new Error('put-like row has no record'), true)
       return
     }
 
     if (outboundMode() === 'dry') {
-      console.warn(`[outbox] 【干跑·未发送】putRecord ${LIKE_COLLECTION} ${row.uri} ${JSON.stringify(record)}`)
+      console.warn(`[outbox] [dry run, not sent] putRecord ${LIKE_COLLECTION} ${row.uri} ${JSON.stringify(record)}`)
       succeed(row, null)
       return
     }
@@ -1015,7 +1015,7 @@ async function deliverLike(row: OutboxRow, kind: 'put-like' | 'delete-like'): Pr
   }
 
   if (outboundMode() === 'dry') {
-    console.warn(`[outbox] 【干跑·未发送】deleteRecord ${LIKE_COLLECTION} ${row.uri}`)
+    console.warn(`[outbox] [dry run, not sent] deleteRecord ${LIKE_COLLECTION} ${row.uri}`)
     succeed(row, null)
     return
   }
@@ -1078,12 +1078,12 @@ export function startOutbox(): void {
     return
   const mode = outboundMode()
   if (mode === 'off') {
-    console.info('[outbox] ATPROTO_OUTBOUND=off，写路径未启动')
+    console.info('[outbox] ATPROTO_OUTBOUND=off, write path not started')
     return
   }
   started = true
   if (mode === 'dry')
-    console.warn('[outbox] ATPROTO_OUTBOUND=dry：只打印将要发出的 XRPC 调用，不发请求（且照常出队）')
+    console.warn('[outbox] ATPROTO_OUTBOUND=dry: only logging the XRPC calls that would go out, sending nothing (rows still dequeue)')
   timer = setInterval(() => {
     void tick()
   }, TICK_MS)
