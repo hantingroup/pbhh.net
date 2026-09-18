@@ -1,12 +1,12 @@
 {
   "lexicon": 1,
   "id": "net.pbhh.feed.post",
-  "description": "pbhh.net 的一条题壁（或一条回复）。",
+  "description": "A pbhh.net wall post (or a reply to one).",
   "defs": {
     "main": {
       "type": "record",
       "key": "tid",
-      "description": "刻意与 app.bsky.feed.post 同形：createdAt 与 reply 逐字一致，只多一个 title、长度按本站而不是 Bluesky。将来真要双发时两个记录的构造代码可以共用，读侧也只需多认一个 $type。",
+      "description": "A pbhh.net post. Shaped like app.bsky.feed.post, plus a title and site-specific length limits.",
       "record": {
         "type": "object",
         "required": ["content", "createdAt"],
@@ -15,23 +15,23 @@
             "type": "string",
             "maxGraphemes": 100,
             "maxLength": 400,
-            "description": "可选标题，渲染在正文之上。对应 posts.title，本站上限 100。"
+            "description": "Optional title, rendered above the body. Corresponds to posts.title; this site caps it at 100 graphemes."
           },
           "content": {
             "type": "string",
             "maxGraphemes": 1000,
             "maxLength": 4000,
-            "description": "Markdown 正文。对应 posts.content，本站上限 1000。这里不带 facets：Bluesky 的 facet 是明文里的字节区间，套在 Markdown 上会切进语法本身（**粗体** 的星号会落进区间）。省掉它也顺带让这份 lexicon 只依赖 com.atproto.*，不引 app.bsky.*。"
+            "description": "Markdown body. Corresponds to posts.content; this site caps it at 1000 graphemes."
           },
           "createdAt": {
             "type": "string",
             "format": "datetime",
-            "description": "原始发表时刻，不是记录写进 repo 的时刻 —— 回填的帖带的是历史时间戳。"
+            "description": "Original publication timestamp. Corresponds to posts.created_at."
           },
           "reply": {
             "type": "ref",
             "ref": "#replyRef",
-            "description": "这条是回复时才有；顶层帖没有这个字段。"
+            "description": "Present only on replies; absent on top-level posts."
           }
         }
       }
@@ -39,7 +39,7 @@
     "replyRef": {
       "type": "object",
       "required": ["parent", "root"],
-      "description": "与 app.bsky.feed.post#replyRef 同形。strongRef 只认 uri 和 cid、不认 collection，所以回复锚在 net.pbhh.feed.post 还是 app.bsky.feed.post 上都成立。",
+      "description": "Reply anchors. Shaped like app.bsky.feed.post#replyRef.",
       "properties": {
         "parent": { "type": "ref", "ref": "com.atproto.repo.strongRef" },
         "root": { "type": "ref", "ref": "com.atproto.repo.strongRef" }
