@@ -520,7 +520,7 @@ function queueResync(did: string): void {
     return
   const last = lastResyncAt.get(did)
   if (last !== undefined && Date.now() - last < RESYNC_COOLDOWN_MS) {
-    console.warn(`[jetstream] ${did} 在冷却期内（${RESYNC_COOLDOWN_MS / 60000} 分钟内已重同步过），忽略这次 sync`)
+    console.warn(`[jetstream] ${did} is in cooldown (already resynced within ${RESYNC_COOLDOWN_MS / 60000} min), ignoring this sync`)
     return
   }
   resyncQueue.add(did)
@@ -628,7 +628,7 @@ export function handleFrame(raw: string): void {
       else {
         // v1 **只记日志**：`#account` 未必等于「账号删了」（可能是远端审核动作），
         // 因一次远端动作删用户本地内容不可逆。
-        console.warn(`[jetstream] account 事件（未处理）did=${payload.did} status=${JSON.stringify((payload.account as { status?: string } | undefined)?.status)}`)
+        console.warn(`[jetstream] unhandled account event did=${payload.did} status=${JSON.stringify((payload.account as { status?: string } | undefined)?.status)}`)
       }
 
       advanceCursor(tx, seq)
@@ -649,20 +649,20 @@ export function handleFrame(raw: string): void {
     if (failureCount >= MAX_REPLAYS) {
       // 毒丸事件：再重放只会把读路径钉死在重连循环里。跳过它并大声记日志 ——
       // 跳过一个已知的坏事件，好过整条读路径永久停摆。
-      console.error(`[jetstream] seq=${seq} 连续失败 ${failureCount} 次，跳过该事件以恢复读取:`, err)
+      console.error(`[jetstream] seq=${seq} failed ${failureCount} times in a row, skipping this event to resume reading:`, err)
       try {
         db.transaction((tx) => {
           advanceCursor(tx, seq)
         })
       }
       catch (advanceErr) {
-        console.error('[jetstream] 跳过时推进游标也失败了:', advanceErr)
+        console.error('[jetstream] advancing the cursor while skipping failed too:', advanceErr)
       }
       failureSeq = undefined
       failureCount = 0
       return
     }
-    console.error(`[jetstream] seq=${seq} 处理失败（第 ${failureCount} 次），断开以从游标重放:`, err)
+    console.error(`[jetstream] seq=${seq} failed (attempt ${failureCount}), disconnecting to replay from the cursor:`, err)
     socket?.close()
     return
   }
@@ -690,10 +690,10 @@ export function handleFrame(raw: string): void {
     for (const did of syncs) {
       if (!did) {
         // 按 lexicon 这不合法（`did` 是 required），真出现就是协议变了。
-        console.warn('[jetstream] sync 事件没有带 did，无法判断该重新同步哪个仓库')
+        console.warn('[jetstream] sync event carried no did, cannot tell which repo to resync')
         continue
       }
-      console.warn(`[jetstream] sync 事件：${did} 的 commit 链断裂，已排队重新同步（若已绑定）`)
+      console.warn(`[jetstream] sync event: ${did} has a broken commit chain, queued for resync (if bound)`)
       queueResync(did)
     }
   }
@@ -742,7 +742,7 @@ function armWatchdog(): void {
     idleTimeoutMs = Math.min(bound * 2, MAX_IDLE_TIMEOUT_MS)
     // Not an error: for a quiet subscription this is the designed steady state, and the
     // paired "已连接" line is what actually reports the outcome.
-    console.debug(`[jetstream] ${Math.round(bound / 60000)} 分钟无帧，判定连接半开，主动重连`)
+    console.debug(`[jetstream] no frames for ${Math.round(bound / 60000)} min, treating the connection as half-open, reconnecting`)
     closingByUs = true
     socket?.close()
     // 重连一次 close() 不一定立刻触发 onclose（半开连接正是如此），再武装一轮；
@@ -767,7 +767,7 @@ function openSocket(url: string, didCount: number): void {
   ws.onopen = () => {
     connected = true
     backoffAttempt = 0
-    console.info(`[jetstream] 已连接（${didCount} 个 did，cursor=${currentCursor ?? '无'}）`)
+    console.info(`[jetstream] connected (${didCount} dids, cursor=${currentCursor ?? 'none'})`)
     resetWatchdog()
   }
 
@@ -794,9 +794,9 @@ function openSocket(url: string, didCount: number): void {
     // times a day at error level, which buries everything else in /admin/log. Only a
     // close nobody asked for is a failure.
     if (expected)
-      console.debug(`[jetstream] 连接关闭（主动）code=${event.code} reason=${event.reason || '-'}`)
+      console.debug(`[jetstream] connection closed (by us) code=${event.code} reason=${event.reason || '-'}`)
     else
-      console.error(`[jetstream] 连接关闭 code=${event.code} reason=${event.reason || '-'}，退避重连`)
+      console.error(`[jetstream] connection closed code=${event.code} reason=${event.reason || '-'}, backing off to reconnect`)
     scheduleConnect(nextBackoff())
   }
 }
@@ -808,7 +808,7 @@ async function connect(): Promise<void> {
   const dids = AtprotoService.getBoundDids()
   if (!dids.length) {
     // 硬闸门。**没有这一条，`dids=` 为空会退化成全网 firehose。**
-    console.info(`[jetstream] 没有已绑定身份，暂不连接（${EMPTY_DID_RETRY_MS / 1000} 秒后再看）`)
+    console.info(`[jetstream] no bound identities, not connecting (retrying in ${EMPTY_DID_RETRY_MS / 1000}s)`)
     scheduleConnect(EMPTY_DID_RETRY_MS)
     return
   }
@@ -828,7 +828,7 @@ async function connect(): Promise<void> {
     case 'cursor-too-old':
       // 停机超过 relay 的 lookback 窗口。重置到 floor 会留下一个已知缺口，
       // 只能靠日志说明 —— 但比重连轰炸或永久停摆都好。
-      console.error(`[jetstream] 游标超期（lookback floor ${result.floor}），重置游标后重连；这段时间的事件已缺失`)
+      console.error(`[jetstream] cursor too old (lookback floor ${result.floor}), resetting it and reconnecting; events from the gap are lost`)
       resetCursor(result.floor)
       // Nothing else will ever tell us what the skipped range held: `sync` events only
       // turn up on archived replay, and we just rejoined at the live tail — the very
@@ -846,7 +846,7 @@ async function connect(): Promise<void> {
       // 非 426 的 400 基本只可能是代码 bug（参数名/形状写错）。「停止重连轰炸」不等于
       // 放弃：用长退避代替停机，既不会刷屏，又保留了服务端行为变化后的自愈能力，
       // 且每次仍记 error。
-      console.error(`[jetstream] 预检失败，疑似代码 bug（${FATAL_RETRY_MS / 60000} 分钟内不重试）: ${result.reason}`)
+      console.error(`[jetstream] precheck failed, looks like a code bug (not retrying for ${FATAL_RETRY_MS / 60000} min): ${result.reason}`)
       scheduleConnect(FATAL_RETRY_MS)
       return
     case 'unavailable':
@@ -861,7 +861,7 @@ async function connect(): Promise<void> {
       // a day and flush the 500-entry ring behind /admin/log. onopen logs the recovery.
       if (!preflightLogged) {
         preflightLogged = true
-        console.error(`[jetstream] 预检失败（中继不可达），退避重试: ${result.reason}`)
+        console.error(`[jetstream] precheck failed (relay unreachable), backing off to retry: ${result.reason}`)
       }
       scheduleConnect(nextBackoff())
       return
@@ -894,7 +894,7 @@ function pollDids(): void {
   if (signature === didSignature)
     return
   didSignature = signature
-  console.info('[jetstream] 绑定列表变化，重连')
+  console.info('[jetstream] bind list changed, reconnecting')
   backoffAttempt = 0
   if (socket) {
     // The `console.info` above already announced this one, so keep `onclose` quiet about it.
@@ -911,7 +911,7 @@ export function startJetstream(): void {
   if (started)
     return
   if ((Bun.env.JETSTREAM_ENABLED ?? 'on') === 'off') {
-    console.info('[jetstream] JETSTREAM_ENABLED=off，读路径未启动')
+    console.info('[jetstream] JETSTREAM_ENABLED=off, read path not started')
     return
   }
   started = true
