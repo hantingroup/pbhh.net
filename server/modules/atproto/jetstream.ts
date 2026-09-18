@@ -49,9 +49,28 @@ const CURSOR_KEY = 'jetstream'
 
 /**
  * 无帧多久就把连接当成半开、主动重连。不能靠 `ws.ping()` 保活 —— 端点声明「任何
- * 客户端数据帧都会关连接」，而 Bun 是否自动回 pong 未知，没必要冒这个险。
+ * 客户端数据帧都会关连接」，而且 Bun 客户端**看不见 pong**：实测 `ws.ping()` 发得出去、
+ * 对端也照回，但 `onpong` 根本不触发（`onping`/`onpong` 是服务端那套 API）。链路死没死
+ * 只能靠「还收不收得到帧」判断。
  */
 const IDLE_TIMEOUT_MS = 5 * 60 * 1000
+/**
+ * Cap on the idle bound, which grows while the stream stays quiet.
+ *
+ * A subscription filtered to a few DIDs is silent by default — one person posts a few
+ * times a day, so five quiet minutes is the norm, not evidence of a half-open socket.
+ * Probing every five minutes on that assumption tore down a healthy connection ~243
+ * times a day and wrote ~486 error lines doing it. So back the probe off as the silence
+ * lasts, and snap back to `IDLE_TIMEOUT_MS` the moment a frame arrives: right after
+ * activity is exactly when a missed event costs something.
+ *
+ * Loosening this is bounded by the cursor: a reconnect replays from it, so anything
+ * published while the socket was silently dead comes back by itself as long as the
+ * cursor is still inside the relay's lookback window — and when it is not, the
+ * `cursor-too-old` branch queues a resync. The worst case is a stale *like*, which the
+ * backfill cannot recover (see `backfill.ts`).
+ */
+const MAX_IDLE_TIMEOUT_MS = 30 * 60 * 1000
 /**
  * 没有已绑定身份时的复查间隔。
  *
@@ -424,6 +443,10 @@ let debounceTimer: ReturnType<typeof setTimeout> | null = null
 let backoffAttempt = 0
 /** Whether the current run of failed preflights has already been logged. See `connect()`. */
 let preflightLogged = false
+/** Idle bound for the current quiet stretch; grows while silent, snaps back on a frame. */
+let idleTimeoutMs = IDLE_TIMEOUT_MS
+/** Set when *we* close the socket, so `onclose` does not report our own teardown as a failure. */
+let closingByUs = false
 let didSignature = ''
 let lastEventAt: number | undefined
 let connected = false
@@ -704,14 +727,28 @@ function clearWatchdog(): void {
 
 /** 收到任何帧就重置。超时说明连接半开（socket 静默死亡、`lastEventAt` 停更但无错误）。 */
 function resetWatchdog(): void {
+  // A frame arrived, so tighten back up — this is the stretch where silence is news.
+  idleTimeoutMs = IDLE_TIMEOUT_MS
+  armWatchdog()
+}
+
+/** Re-arm without touching the bound; the watchdog itself uses this while silence lasts. */
+function armWatchdog(): void {
   clearWatchdog()
+  // Read the bound now: it is the delay this timer is actually armed with, and the
+  // callback below has already doubled it by the time it runs.
+  const bound = idleTimeoutMs
   watchdogTimer = setTimeout(() => {
-    console.error(`[jetstream] ${IDLE_TIMEOUT_MS / 60000} 分钟无帧，判定连接半开，主动重连`)
+    idleTimeoutMs = Math.min(bound * 2, MAX_IDLE_TIMEOUT_MS)
+    // Not an error: for a quiet subscription this is the designed steady state, and the
+    // paired "已连接" line is what actually reports the outcome.
+    console.debug(`[jetstream] ${Math.round(bound / 60000)} 分钟无帧，判定连接半开，主动重连`)
+    closingByUs = true
     socket?.close()
     // 重连一次 close() 不一定立刻触发 onclose（半开连接正是如此），再武装一轮；
     // 真正的 onclose 会把它清掉。
-    resetWatchdog()
-  }, IDLE_TIMEOUT_MS)
+    armWatchdog()
+  }, bound)
   watchdogTimer.unref?.()
 }
 
@@ -722,6 +759,10 @@ function currentDidSignature(): string {
 function openSocket(url: string, didCount: number): void {
   const ws = new WebSocket(url)
   socket = ws
+  // A fresh socket must not inherit the flag from the close that led here — a stop or a
+  // close that never fired `onclose` would otherwise have the next real failure read as
+  // our own doing and drop to debug.
+  closingByUs = false
 
   ws.onopen = () => {
     connected = true
@@ -742,12 +783,20 @@ function openSocket(url: string, didCount: number): void {
   ws.onclose = (event) => {
     if (socket !== ws)
       return
+    const expected = closingByUs
+    closingByUs = false
     socket = null
     connected = false
     clearWatchdog()
     if (!started)
       return
-    console.error(`[jetstream] 连接关闭 code=${event.code} reason=${event.reason || '-'}，退避重连`)
+    // A close we asked for (idle watchdog, DID rebind) is routine — it happened ~243
+    // times a day at error level, which buries everything else in /admin/log. Only a
+    // close nobody asked for is a failure.
+    if (expected)
+      console.debug(`[jetstream] 连接关闭（主动）code=${event.code} reason=${event.reason || '-'}`)
+    else
+      console.error(`[jetstream] 连接关闭 code=${event.code} reason=${event.reason || '-'}，退避重连`)
     scheduleConnect(nextBackoff())
   }
 }
@@ -781,6 +830,16 @@ async function connect(): Promise<void> {
       // 只能靠日志说明 —— 但比重连轰炸或永久停摆都好。
       console.error(`[jetstream] 游标超期（lookback floor ${result.floor}），重置游标后重连；这段时间的事件已缺失`)
       resetCursor(result.floor)
+      // Nothing else will ever tell us what the skipped range held: `sync` events only
+      // turn up on archived replay, and we just rejoined at the live tail — the very
+      // signal that exists to say "you missed something" cannot fire for a range we
+      // jumped over. So ask every bound repo for its recent records instead; that is
+      // the same repair `sync` triggers, and it costs one `listRecords` per DID.
+      //
+      // Usually a no-op: if the DID was merely quiet, every record is already mirrored
+      // and dedupes away. It only earns its keep when the reset really did skip events.
+      for (const did of dids)
+        queueResync(did)
       scheduleConnect(0)
       return
     case 'fatal':
@@ -818,10 +877,14 @@ export function scheduleJetstreamReconnect(): void {
   debounceTimer = setTimeout(() => {
     debounceTimer = null
     backoffAttempt = 0
-    if (socket)
+    if (socket) {
+      // Ours, not a failure: `onclose` logs it at debug.
+      closingByUs = true
       socket.close()
-    else
+    }
+    else {
       scheduleConnect(0)
+    }
   }, RECONNECT_DEBOUNCE_MS)
   debounceTimer.unref?.()
 }
@@ -833,10 +896,14 @@ function pollDids(): void {
   didSignature = signature
   console.info('[jetstream] 绑定列表变化，重连')
   backoffAttempt = 0
-  if (socket)
+  if (socket) {
+    // The `console.info` above already announced this one, so keep `onclose` quiet about it.
+    closingByUs = true
     socket.close()
-  else
+  }
+  else {
     scheduleConnect(0)
+  }
 }
 
 /** 启动点（`atproto/index.ts` 模块加载处）。**必须幂等** —— 重复调用不许开出第二条连接。 */
