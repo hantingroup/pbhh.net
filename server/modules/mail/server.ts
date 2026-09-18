@@ -79,6 +79,13 @@ export const mailServer = new SMTPServer({
   },
 })
 
+// smtp-server funnels every socket error into SMTPServer._onError, which re-emits it
+// here. An unhandled 'error' event throws, so a single scanner dropping its connection
+// mid-write took the whole process down with ERR_SOCKET_CLOSED.
+mailServer.on('error', (err: Error & { code?: string, remoteAddress?: string }) => {
+  console.warn(`[mail] connection error from ${err.remoteAddress || 'unknown'}: ${err.code || err.message}`)
+})
+
 onEmail(async ({ recipientUsername, subject, html, text, fromAddress }) => {
   await deliverMailToUser(recipientUsername, fromAddress, subject, text, html)
 })

@@ -1,5 +1,8 @@
+diff --git a/node_modules/smtp-server/.bun-tag-bbb952d13c9a68c8 b/.bun-tag-bbb952d13c9a68c8
+new file mode 100644
+index 0000000000000000000000000000000000000000..e69de29bb2d1d6434b8b29ae775ad8c2e48c5391
 diff --git a/lib/smtp-connection.js b/lib/smtp-connection.js
-index 410d6ed062df450707b60a5923b58d22beb02d45..c1b1cc638adf25609a1e9884cefb6c3d0b342125 100644
+index 410d6ed062df450707b60a5923b58d22beb02d45..74a9a0834e81f97493e6e5f6f57cd33b871419c3 100644
 --- a/lib/smtp-connection.js
 +++ b/lib/smtp-connection.js
 @@ -384,7 +384,17 @@ class SMTPConnection extends EventEmitter {
@@ -36,3 +39,16 @@ index 410d6ed062df450707b60a5923b58d22beb02d45..c1b1cc638adf25609a1e9884cefb6c3d
          }
  
          this._server.connections.delete(this);
+@@ -505,7 +521,11 @@ class SMTPConnection extends EventEmitter {
+             err.message
+         );
+ 
+-        if ((err.code === 'ECONNRESET' || err.code === 'EPIPE') && (!this.session.envelope || !this.session.envelope.mailFrom)) {
++        // NOTE(pbhh.net local patch): ERR_SOCKET_CLOSED belongs with the two above -- it
++        // means the peer's handle is gone, not that the mail transaction went wrong. Left
++        // out, it falls through to the emit below, reaches SMTPServer._onError, and with
++        // nothing listening on the server that emit takes the whole process down.
++        if ((err.code === 'ECONNRESET' || err.code === 'EPIPE' || err.code === 'ERR_SOCKET_CLOSED') && (!this.session.envelope || !this.session.envelope.mailFrom)) {
+             // We got a connection error outside transaction. In most cases it means dirty
+             // connection ending by the other party, so we can just ignore it
+             this.close(); // mark connection as 'closing'
