@@ -1,6 +1,5 @@
 <script setup lang="ts">
 import { nextTick, ref, watch } from 'vue'
-import { useI18n } from 'vue-i18n'
 import { ScrollArea } from '@/components/ui/scroll-area'
 
 const props = defineProps<{
@@ -9,9 +8,18 @@ const props = defineProps<{
   emptyText: string
 }>()
 
-const { d } = useI18n()
-
 export interface LogEntry { level: string, message: string, timestamp: number }
+
+// The admin area is English-only, so timestamps are formatted here rather than
+// through vue-i18n, whose `d()` would follow the site locale.
+const TIMESTAMP_FORMAT = new Intl.DateTimeFormat('en-US', {
+  year: 'numeric',
+  month: '2-digit',
+  day: '2-digit',
+  hour: '2-digit',
+  minute: '2-digit',
+  second: '2-digit',
+})
 
 const logEl = ref<{ viewport: HTMLElement | null } | null>(null)
 
@@ -37,7 +45,7 @@ watch(() => props.logs.length, () => {
       :key="i"
       class="flex gap-2 leading-5"
     >
-      <span class="text-muted-foreground shrink-0">{{ d(entry.timestamp, 'long') }}</span>
+      <span class="text-muted-foreground shrink-0">{{ TIMESTAMP_FORMAT.format(entry.timestamp) }}</span>
       <span class="shrink-0 w-8 uppercase font-semibold" :class="LEVEL_CLASS[entry.level]">{{ entry.level }}</span>
       <span class="break-all whitespace-pre-wrap">{{ entry.message }}</span>
     </div>

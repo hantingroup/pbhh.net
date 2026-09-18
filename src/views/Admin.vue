@@ -9,15 +9,15 @@ const router = useRouter()
 const route = useRoute()
 const canViewAdmin = computed(() => hasCapability(user.value?.capabilities, 'admin:view'))
 
-type Tab = 'backend' | 'database'
+type Tab = 'log' | 'database'
 
 const tabs: Array<{ key: Tab, label: string, to: string }> = [
-  { key: 'backend', label: '服务端日志', to: '/admin/log' },
-  { key: 'database', label: '数据库', to: '/admin/database' },
+  { key: 'log', label: 'Log', to: '/admin/log' },
+  { key: 'database', label: 'Database', to: '/admin/database' },
 ]
 
 const currentTab = computed<Tab>(() =>
-  route.path === '/admin/database' ? 'database' : 'backend',
+  route.path === '/admin/database' ? 'database' : 'log',
 )
 
 onMounted(() => {

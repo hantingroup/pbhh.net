@@ -35,10 +35,10 @@ const headline = computed(() => {
   if (error.value)
     return error.value
   if (status.value?.status === 'failed')
-    return status.value.error ?? 'Drizzle Studio 启动失败'
+    return status.value.error ?? 'Drizzle Studio failed to start'
   if (status.value?.status === 'starting')
-    return '正在启动 Drizzle Studio…'
-  return '正在连接 Drizzle Studio…'
+    return 'Starting Drizzle Studio…'
+  return 'Connecting to Drizzle Studio…'
 })
 
 function stopPolling() {
@@ -50,14 +50,14 @@ function stopPolling() {
 
 function poll(): Promise<'ready' | 'pending' | 'stop'> {
   if (Date.now() > deadline) {
-    error.value = status.value?.error ?? 'Drizzle Studio 启动超时'
+    error.value = status.value?.error ?? 'Timed out starting Drizzle Studio'
     return Promise.resolve('stop')
   }
 
   return fetch(`${BASE}/status`)
     .then(async (res) => {
       if (!res.ok) {
-        error.value = '无法获取 Drizzle Studio 状态'
+        error.value = 'Could not read Drizzle Studio status'
         return 'stop' as const
       }
       status.value = await res.json()
@@ -68,7 +68,7 @@ function poll(): Promise<'ready' | 'pending' | 'stop'> {
       return 'pending' as const
     })
     .catch(() => {
-      error.value = '无法获取 Drizzle Studio 状态'
+      error.value = 'Could not read Drizzle Studio status'
       return 'stop' as const
     })
 }
@@ -117,7 +117,7 @@ onUnmounted(stopPolling)
 
         <div v-if="error" class="flex justify-center">
           <Button variant="outline" size="sm" @click="start">
-            重试
+            Retry
           </Button>
         </div>
       </div>

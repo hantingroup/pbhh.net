@@ -53,13 +53,13 @@ const updateSummary = computed(() => {
   const state = updateState.value
 
   if (state?.running)
-    return `update.sh 执行中${state.startedAt ? ` · ${formatTimestamp(state.startedAt)}` : ''}`
+    return `update.sh running${state.startedAt ? ` · ${formatTimestamp(state.startedAt)}` : ''}`
   if (updateError.value)
     return updateError.value
   if (state?.status === 'success')
-    return `update.sh 执行成功${state.finishedAt ? ` · ${formatTimestamp(state.finishedAt)}` : ''}`
+    return `update.sh succeeded${state.finishedAt ? ` · ${formatTimestamp(state.finishedAt)}` : ''}`
   if (state?.status === 'failed')
-    return `update.sh 执行失败${state.finishedAt ? ` · ${formatTimestamp(state.finishedAt)}` : ''}`
+    return `update.sh failed${state.finishedAt ? ` · ${formatTimestamp(state.finishedAt)}` : ''}`
   return ''
 })
 
@@ -69,7 +69,7 @@ const updateDetail = computed(() => {
     return ''
 
   if (state.running)
-    return latestUpdateLine.value || (state.pid ? `PID ${state.pid}` : '等待日志输出')
+    return latestUpdateLine.value || (state.pid ? `PID ${state.pid}` : 'waiting for output')
   if (updateError.value)
     return ''
   if (state.status === 'failed')
@@ -83,7 +83,7 @@ function formatTimestamp(value: number | null) {
   if (!value)
     return ''
 
-  return new Intl.DateTimeFormat('zh-CN', {
+  return new Intl.DateTimeFormat('en-US', {
     month: '2-digit',
     day: '2-digit',
     hour: '2-digit',
@@ -95,9 +95,9 @@ function formatTimestamp(value: number | null) {
 
 function getExitSummary(state: UpdateStatus) {
   if (state.exitCode !== null)
-    return `退出码 ${state.exitCode}`
+    return `exit code ${state.exitCode}`
   if (state.signal)
-    return `信号 ${state.signal}`
+    return `signal ${state.signal}`
   return ''
 }
 
@@ -157,10 +157,10 @@ async function runUpdate() {
     if (!res.ok) {
       applyUpdateState(body.update)
       updateError.value = body.message === 'error.updateScriptMissing'
-        ? '未找到 update.sh'
+        ? 'update.sh not found'
         : body.message === 'error.updateAlreadyRunning'
           ? ''
-          : '执行 update.sh 失败'
+          : 'failed to run update.sh'
       if (!body.update)
         await loadUpdateStatus()
       return
@@ -170,7 +170,7 @@ async function runUpdate() {
     await loadUpdateStatus()
   }
   catch {
-    updateError.value = '执行 update.sh 失败'
+    updateError.value = 'failed to run update.sh'
   }
   finally {
     updateSubmitting.value = false
@@ -287,7 +287,7 @@ onUnmounted(() => {
           :disabled="isUpdateBusy"
           @click="runUpdate"
         >
-          {{ isUpdateBusy ? '执行中…' : 'update.sh' }}
+          {{ isUpdateBusy ? 'Running…' : 'update.sh' }}
         </Button>
       </div>
       <div class="ml-auto flex items-center gap-2 shrink-0">
@@ -296,7 +296,7 @@ onUnmounted(() => {
           class="text-xs border rounded px-2 py-1 bg-background text-foreground"
         >
           <option value="">
-            实时
+            Live
           </option>
           <option v-for="d in logDates" :key="d" :value="d">
             {{ d }}
@@ -305,20 +305,20 @@ onUnmounted(() => {
         <template v-if="!selectedDate">
           <label class="flex items-center gap-1.5 text-xs text-muted-foreground cursor-pointer">
             <input v-model="autoScroll" type="checkbox" class="size-3">
-            自动滚动
+            Auto-scroll
           </label>
         </template>
         <template v-if="totalLogPages > 1">
           <Button variant="ghost" size="sm" :disabled="logPage === 0" @click="logPage--">
-            上一页
+            Previous
           </Button>
           <span class="text-xs text-muted-foreground">{{ logPage + 1 }}/{{ totalLogPages }}</span>
           <Button variant="ghost" size="sm" :disabled="logPage >= totalLogPages - 1" @click="logPage++">
-            下一页
+            Next
           </Button>
         </template>
         <Button v-if="!selectedDate" variant="outline" size="sm" @click="backendLogs = []">
-          清空
+          Clear
         </Button>
       </div>
     </div>
@@ -326,7 +326,7 @@ onUnmounted(() => {
     <AdminLog
       :logs="pagedLogs"
       :auto-scroll="autoScroll && !selectedDate"
-      :empty-text="historyLoading ? '加载中…' : '等待日志…'"
+      :empty-text="historyLoading ? 'Loading…' : 'Waiting for logs…'"
     />
   </div>
 </template>
