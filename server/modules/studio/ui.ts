@@ -33,6 +33,27 @@ const ASSETS: Record<string, AssetSpec> = {
   'favicon.svg': { contentType: 'image/svg+xml' },
 }
 
+/**
+ * The `@font-face` rules inside index.js resolve against `document.baseURI` (a module
+ * script has no `document.currentScript`), so font requests land on /ui/fonts/*. They
+ * need no patching, so they are redirected upstream rather than cached here.
+ *
+ * The allowlist is load-bearing: upstream answers any unknown path with the SPA's
+ * index.html and a 200, and a font that fails to load fails silently.
+ */
+const UPSTREAM_FONTS = new Set([
+  'Geist-Medium.otf',
+  'GeistMono-Regular.otf',
+  'Geist-Regular.otf',
+  'Geist-SemiBold.otf',
+  'Menlo-Regular.ttf',
+  'OperatorMono-Book.otf',
+])
+
+export function upstreamFontUrl(name: string) {
+  return UPSTREAM_FONTS.has(name) ? `${UPSTREAM}/fonts/${name}` : null
+}
+
 export interface StudioAsset {
   body: string
   contentType: string

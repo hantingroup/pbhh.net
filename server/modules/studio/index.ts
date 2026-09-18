@@ -4,7 +4,7 @@ import { userHasCapability } from '../auth/service'
 import { jwtPlugin } from '../jwt'
 import { ensureStudioRunning, getStudioStatus } from './process'
 import { proxyStudio } from './proxy'
-import { readStudioAsset } from './ui'
+import { readStudioAsset, upstreamFontUrl } from './ui'
 
 /**
  * 把 Drizzle Studio 挂在管理后台里。
@@ -56,6 +56,20 @@ export default new Elysia({ prefix: '/admin/studio' })
     return pathname.endsWith('/')
       ? serveAsset('index.html', request)
       : new Response(null, { status: 302, headers: { location: `${pathname}/` } })
+  })
+  // Fonts need no patching, so send the browser to the CDN instead of caching them here.
+  // Still behind the guard: this is the admin's studio, not a public font host.
+  //
+  // The ACAO header is for the redirect hop itself — fonts are fetched in CORS mode, and
+  // a hop without it can drop the font with nothing in the server log to show for it.
+  .get('/ui/fonts/:name', ({ params }) => {
+    const url = upstreamFontUrl(params.name)
+    return url
+      ? new Response(null, {
+          status: 307,
+          headers: { 'location': url, 'access-control-allow-origin': '*' },
+        })
+      : new Response('Not Found', { status: 404 })
   })
   .get('/ui/:file', ({ params, request }) => serveAsset(params.file, request))
   // ── API 转发 ──────────────────────────────────────────────────────────────
