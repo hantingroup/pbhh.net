@@ -127,6 +127,7 @@ type Preflight =
   | { kind: 'ok' }
   | { kind: 'cursor-too-old', floor: number }
   | { kind: 'fatal', reason: string }
+  | { kind: 'unavailable', reason: string }
   | { kind: 'network', reason: string }
 
 /**
@@ -150,6 +151,12 @@ export async function preflight(url: string): Promise<Preflight> {
 
   if (res.status === 426)
     return { kind: 'ok' }
+
+  // A 5xx/429 is the relay failing, not our request: with no healthy backend, HAProxy
+  // answers 503 *for every path on the host*, error page and all. Retryable, and the
+  // body is an HTML error page, so don't bother reading it.
+  if (res.status >= 500 || res.status === 429)
+    return { kind: 'unavailable', reason: `HTTP ${res.status}` }
 
   const body = await res.text().catch(() => '')
   if (res.status === 400 && body.includes('CursorTooOld')) {
@@ -415,6 +422,8 @@ let watchdogTimer: ReturnType<typeof setTimeout> | null = null
 let didPollTimer: ReturnType<typeof setInterval> | null = null
 let debounceTimer: ReturnType<typeof setTimeout> | null = null
 let backoffAttempt = 0
+/** Whether the current run of failed preflights has already been logged. See `connect()`. */
+let preflightLogged = false
 let didSignature = ''
 let lastEventAt: number | undefined
 let connected = false
@@ -763,6 +772,9 @@ async function connect(): Promise<void> {
 
   switch (result.kind) {
     case 'ok':
+      // A clean preflight means the relay is up, so the next failure is a new run and
+      // gets its own line. Not reset on open: a failed handshake would stick the flag.
+      preflightLogged = false
       break
     case 'cursor-too-old':
       // 停机超过 relay 的 lookback 窗口。重置到 floor 会留下一个已知缺口，
@@ -778,8 +790,20 @@ async function connect(): Promise<void> {
       console.error(`[jetstream] 预检失败，疑似代码 bug（${FATAL_RETRY_MS / 60000} 分钟内不重试）: ${result.reason}`)
       scheduleConnect(FATAL_RETRY_MS)
       return
+    case 'unavailable':
     case 'network':
-      console.error(`[jetstream] 预检网络错误，退避重试: ${result.reason}`)
+      // The relay is unreachable — a 5xx/429 is its failure, a thrown fetch is the
+      // link's — so neither means our request shape is wrong and both take the
+      // 60s-capped backoff. They must NOT take fatal's 30 minutes: that turns one
+      // upstream blip into half an hour of a dead read path, and the log would blame
+      // our own parameters for it.
+      //
+      // Only the first line of a run: at a 60s cap a long outage would write 1440 lines
+      // a day and flush the 500-entry ring behind /admin/log. onopen logs the recovery.
+      if (!preflightLogged) {
+        preflightLogged = true
+        console.error(`[jetstream] 预检失败（中继不可达），退避重试: ${result.reason}`)
+      }
       scheduleConnect(nextBackoff())
       return
   }
