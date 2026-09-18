@@ -29,7 +29,50 @@ import * as AtprotoService from './service'
  *   `collections filter can never apply`。
  */
 
-const JETSTREAM_ORIGIN = 'wss://jetstream.us-east.bsky.network'
+/**
+ * Candidate endpoints, most preferred first.
+ *
+ * 2026-09-18: `jetstream.us-east.bsky.network` answered 503 on **every** path — HAProxy with
+ * no healthy backend — while `jetstream.us-west.bsky.network` answered 426, the "upgrade
+ * required" a healthy subscribe path returns. The numbered `jetstream1/2.<region>` hosts look
+ * healthy on `/` (200) but 404 on the subscribe path: they do not serve v2, so they cannot
+ * stand in. When this wall falls there is nothing to do but change the name.
+ *
+ * The order is the failover order, and a successful open pins us to that endpoint (see
+ * `originIndex`) — hard-coding the first name is what left the read path down for a day.
+ */
+const DEFAULT_ORIGINS = [
+  'wss://jetstream.us-west.bsky.network',
+  'wss://jetstream.us-east.bsky.network',
+]
+/**
+ * `JETSTREAM_ORIGINS` (comma-separated) replaces the list. The point is that a dead endpoint
+ * costs an env change and a restart instead of a code change and a deploy. Entries that are
+ * not `wss://` are dropped rather than trusted.
+ */
+function parseOrigins(raw: string | undefined): string[] {
+  const list = (raw ?? '')
+    .split(',')
+    .map(origin => origin.trim().replace(/\/+$/, ''))
+    .filter(origin => origin.startsWith('wss://'))
+  if (list.length)
+    return list
+  if (raw)
+    console.warn('[jetstream] JETSTREAM_ORIGINS holds no usable wss:// origin, using the built-in list')
+  return DEFAULT_ORIGINS
+}
+const JETSTREAM_ORIGINS = parseOrigins(Bun.env.JETSTREAM_ORIGINS)
+/** Which candidate is in use. Moves only when one proves unreachable, and survives success. */
+let originIndex = 0
+/** Candidates probed since the last one answered. A full cycle with no answer is one outage. */
+let triedOrigins = 0
+/** Endpoints already reported unreachable in this run, so a long outage names each one once. */
+const deadOriginsReported = new Set<string>()
+
+function currentOrigin(): string {
+  return JETSTREAM_ORIGINS[originIndex % JETSTREAM_ORIGINS.length]!
+}
+
 const SUBSCRIBE_PATH = '/xrpc/network.bsky.jetstream.subscribeEvents'
 /**
  * 两种 collection。**like 也能订到，是 `dids` 过滤方式的直接结果**：JetStream 按**事件来源
@@ -137,7 +180,7 @@ export function buildSubscribeUrl(dids: string[], cursor?: number): string {
   if (cursor !== undefined)
     params.set('cursor', String(cursor))
 
-  return `${JETSTREAM_ORIGIN}${SUBSCRIBE_PATH}?${params}`
+  return `${currentOrigin()}${SUBSCRIBE_PATH}?${params}`
 }
 
 // ─── 预检 ─────────────────────────────────────────────────────────────────────
@@ -148,6 +191,14 @@ type Preflight =
   | { kind: 'fatal', reason: string }
   | { kind: 'unavailable', reason: string }
   | { kind: 'network', reason: string }
+
+/**
+ * Bound on the preflight GET. `fetch` has none by default, so a black-holed connection hangs
+ * rather than throwing — a connect loop parked there never rotates endpoints, never logs, and
+ * leaves a dead read path with nothing to show for it. Timing out turns that into the
+ * `network` case, which does both.
+ */
+const PREFLIGHT_TIMEOUT_MS = 20 * 1000
 
 /**
  * 用纯 HTTP GET 预检同一个 URL。这**不是**可选的优化：
@@ -162,7 +213,7 @@ export async function preflight(url: string): Promise<Preflight> {
   const httpUrl = url.replace(/^wss:/, 'https:')
   let res: Response
   try {
-    res = await fetch(httpUrl)
+    res = await fetch(httpUrl, { signal: AbortSignal.timeout(PREFLIGHT_TIMEOUT_MS) })
   }
   catch (err) {
     return { kind: 'network', reason: String(err) }
@@ -801,6 +852,17 @@ function openSocket(url: string, didCount: number): void {
   }
 }
 
+/**
+ * The current endpoint answered something other than "I am down", so the outage run is over
+ * and the next failure gets its own lines. Not reset in `openSocket`: a handshake rejected
+ * after a clean preflight would stick `preflightLogged` and silence the retry.
+ */
+function resetOriginCycle(): void {
+  triedOrigins = 0
+  deadOriginsReported.clear()
+  preflightLogged = false
+}
+
 async function connect(): Promise<void> {
   if (!started)
     return
@@ -821,11 +883,10 @@ async function connect(): Promise<void> {
 
   switch (result.kind) {
     case 'ok':
-      // A clean preflight means the relay is up, so the next failure is a new run and
-      // gets its own line. Not reset on open: a failed handshake would stick the flag.
-      preflightLogged = false
+      resetOriginCycle()
       break
     case 'cursor-too-old':
+      resetOriginCycle()
       // 停机超过 relay 的 lookback 窗口。重置到 floor 会留下一个已知缺口，
       // 只能靠日志说明 —— 但比重连轰炸或永久停摆都好。
       console.error(`[jetstream] cursor too old (lookback floor ${result.floor}), resetting it and reconnecting; events from the gap are lost`)
@@ -843,28 +904,45 @@ async function connect(): Promise<void> {
       scheduleConnect(0)
       return
     case 'fatal':
+      resetOriginCycle()
       // 非 426 的 400 基本只可能是代码 bug（参数名/形状写错）。「停止重连轰炸」不等于
       // 放弃：用长退避代替停机，既不会刷屏，又保留了服务端行为变化后的自愈能力，
-      // 且每次仍记 error。
+      // 且每次仍记 error。Rotating endpoints would not help here — a 400 means the
+      // endpoint is alive and rejecting what we sent.
       console.error(`[jetstream] precheck failed, looks like a code bug (not retrying for ${FATAL_RETRY_MS / 60000} min): ${result.reason}`)
       scheduleConnect(FATAL_RETRY_MS)
       return
     case 'unavailable':
-    case 'network':
+    case 'network': {
       // The relay is unreachable — a 5xx/429 is its failure, a thrown fetch is the
-      // link's — so neither means our request shape is wrong and both take the
-      // 60s-capped backoff. They must NOT take fatal's 30 minutes: that turns one
-      // upstream blip into half an hour of a dead read path, and the log would blame
-      // our own parameters for it.
-      //
-      // Only the first line of a run: at a 60s cap a long outage would write 1440 lines
-      // a day and flush the 500-entry ring behind /admin/log. onopen logs the recovery.
+      // link's — so neither means our request shape is wrong and both take the short
+      // backoff. They must NOT take fatal's 30 minutes: that turns one upstream blip
+      // into half an hour of a dead read path, and the log would blame our own
+      // parameters for it.
+      const dead = currentOrigin()
+      if (!deadOriginsReported.has(dead)) {
+        deadOriginsReported.add(dead)
+        console.warn(`[jetstream] ${dead} is unreachable (${result.reason}), rotating to the next endpoint`)
+      }
+      originIndex = (originIndex + 1) % JETSTREAM_ORIGINS.length
+      triedOrigins++
+      // An untried candidate is one request away; making it wait out a backoff is a dead
+      // read path for no reason when only one endpoint of the list is actually down.
+      if (triedOrigins < JETSTREAM_ORIGINS.length) {
+        scheduleConnect(0)
+        return
+      }
+      // A full cycle with no answer is one outage, not N. One line per run: at the 60s cap
+      // a long outage would write 1440 lines a day and flush the 500-entry ring behind
+      // /admin/log. `onopen` logs the recovery.
       if (!preflightLogged) {
         preflightLogged = true
-        console.error(`[jetstream] precheck failed (relay unreachable), backing off to retry: ${result.reason}`)
+        console.error(`[jetstream] all ${JETSTREAM_ORIGINS.length} endpoints are unreachable, backing off to retry: ${result.reason}`)
       }
+      triedOrigins = 0
       scheduleConnect(nextBackoff())
       return
+    }
   }
 
   openSocket(url, dids.length)
@@ -954,6 +1032,8 @@ export function getJetstreamStatus() {
   return {
     enabled: (Bun.env.JETSTREAM_ENABLED ?? 'on') !== 'off',
     connected,
+    /** Which candidate is in use — the first thing to look at when the read path is down. */
+    origin: currentOrigin(),
     cursor: currentCursor ?? null,
     lastEventAt: lastEventAt ?? null,
     boundDidCount: AtprotoService.getBoundDids().length,
