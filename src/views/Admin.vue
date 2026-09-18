@@ -27,7 +27,10 @@ onMounted(() => {
 </script>
 
 <template>
-  <div class="w-full h-full min-h-0 flex flex-col overflow-hidden">
+  <!-- A definite viewport height, not h-full: the parent main only has min-height, so a
+       percentage height resolves to auto and the flex-1 iframe falls back to ~150px.
+       Same workaround as RoomChat.vue. -->
+  <div class="w-full h-[calc(100vh-4rem)] min-h-0 flex flex-col overflow-hidden">
     <div class="shrink-0 border-b bg-background sticky top-0 z-20">
       <div class="px-4 py-3 flex items-center gap-4 overflow-x-auto">
         <span class="font-bold shrink-0">Admin</span>
