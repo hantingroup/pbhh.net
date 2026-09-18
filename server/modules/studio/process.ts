@@ -17,16 +17,25 @@ const STUDIO_HOST = '127.0.0.1'
 const STUDIO_PORT = 4983
 
 /** 显式给了地址就当成外部托管，本模块只管转发、不 spawn。 */
-export const STUDIO_ORIGIN = Bun.env.DRIZZLE_STUDIO_URL ?? `http://${STUDIO_HOST}:${STUDIO_PORT}`
-const AUTO_SPAWN = !Bun.env.DRIZZLE_STUDIO_URL
+export const STUDIO_ORIGIN = process.env.DRIZZLE_STUDIO_URL ?? `http://${STUDIO_HOST}:${STUDIO_PORT}`
+const AUTO_SPAWN = !process.env.DRIZZLE_STUDIO_URL
 
-const BUN_EXECUTABLE = Bun.which('bun') || 'bun'
+/**
+ * 跑 drizzle-kit 用的那个 bun，取 `process.execPath` 而不是 `Bun.which('bun')`：
+ * systemd 单元的 PATH 只有 `/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin`，而 bun
+ * 装在 `/root/.bun/bin` —— which 返回 null，回落到字面量 `"bun"` 之后 spawn 直接失败，
+ * 页面上就是「Executable not found in $PATH: "bun"」。后端自己就是 bun 起来的，
+ * execPath 一定指得到它。
+ */
+const EXECUTABLE = process.execPath
 const MAX_OUTPUT_LINES = 40
 const PROBE_TIMEOUT_MS = 1500
 const READY_TIMEOUT_MS = 90_000
 const POLL_INTERVAL_MS = 300
 /** 前端在轮询 /status，失败后不能每次都重新 spawn —— 否则会一秒拉起一个进程。 */
 const RETRY_COOLDOWN_MS = 15_000
+
+const sleep = (ms: number) => new Promise<void>(done => setTimeout(done, ms))
 
 export interface StudioStatus {
   ready: boolean
@@ -121,7 +130,7 @@ async function boot(): Promise<boolean> {
     // 进程自己退了（端口被占、schema 加载失败…），再等也没有意义。
     if (!state.pid)
       break
-    await Bun.sleep(POLL_INTERVAL_MS)
+    await sleep(POLL_INTERVAL_MS)
   }
 
   failedAt = Date.now()
@@ -136,8 +145,8 @@ function spawnStudio() {
   state.lastOutput = []
 
   const child = spawn(
-    BUN_EXECUTABLE,
-    ['x', 'drizzle-kit', 'studio', '--host', STUDIO_HOST, '--port', String(STUDIO_PORT)],
+    EXECUTABLE,
+    ['run', 'drizzle-kit', 'studio', '--host', STUDIO_HOST, '--port', String(STUDIO_PORT)],
     {
       cwd: serverRoot,
       detached: true,
